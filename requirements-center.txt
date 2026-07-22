@@ -1,0 +1,2 @@
+# 中心服务只提供 HTML、API 和 MySQL 数据访问，不运行 Minium 或 Excel 工具。
+PyMySQL>=1.1.0,<2

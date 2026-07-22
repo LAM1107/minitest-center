@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Minitest Case Form</title>
+  <script>
+    (function () {
+      var path = window.location.pathname.replace(/\/+$/, "") || "/";
+      var markers = ["/cases", "/public-actions", "/api", "/reports"];
+      var base = "";
+      for (var i = 0; i < markers.length; i += 1) {
+        var index = path.indexOf(markers[i]);
+        if (index > 0) {
+          base = path.slice(0, index);
+          break;
+        }
+      }
+      window.__MINITEST_BASE_PATH__ = base === "/" ? "" : base;
+      document.write('<link rel="stylesheet" href="' + window.__MINITEST_BASE_PATH__ + '/style.css">');
+    })();
+  </script>
+</head>
+<body>
+  <main class="app-shell app-shell-single">
+    <section class="workspace">
+      <nav class="tabs">
+        <a class="tab" href="/cases">正式用例</a>
+        <a class="tab active" href="/cases/new" id="caseFormNav">新建用例</a>
+      </nav>
+
+      <form id="caseForm" class="editor editor-page case-editor">
+        <div class="toolbar">
+          <div>
+            <h2 id="runtimeEditorTitle">新建正式用例</h2>
+            <p id="normalizedHint" class="hint"></p>
+          </div>
+          <div class="toolbar-actions">
+            <span id="caseFormExecutionTargetHint" class="execution-target-status"></span>
+            <a class="btn btn-secondary" href="/cases">返回列表</a>
+            <button id="saveBtn" class="btn btn-secondary" type="submit">保存用例</button>
+            <button id="runBtn" class="btn btn-primary" type="button">保存并执行</button>
+          </div>
+        </div>
+
+        <div class="grid case-editor-basic">
+          <label>
+            <span>case_id</span>
+            <input name="case_id" required placeholder="请输入用例唯一id">
+          </label>
+          <label>
+            <span>用例标题</span>
+            <input name="title" required placeholder="请输入用例标题">
+          </label>
+          <label>
+            <span>所属迭代</span>
+            <select name="iteration_id">
+              <option value="">未分配迭代</option>
+            </select>
+          </label>
+          <div class="mode-switch wide">
+            <label class="radio-card">
+              <input name="case_mode" type="radio" value="generate" checked>
+              <span>
+                <strong>按步骤编排</strong>
+                <small>直接保存到 mt_case_steps，由通用执行器逐步执行</small>
+              </span>
+            </label>
+            <label class="radio-card">
+              <input name="case_mode" type="radio" value="reuse">
+              <span>
+                <strong>复用已有用例</strong>
+                <small>复制已有用例步骤，只维护新用例参数和断言</small>
+              </span>
+            </label>
+          </div>
+
+          <div class="flow-location wide hidden">
+            <label>
+              <span>业务目录</span>
+              <select name="flow_group_dir">
+                <option value="">根目录</option>
+                <option value="front_operate">front_operate：首页 / 前台</option>
+                <option value="mine_operate">mine_operate：我的页操作</option>
+                <option value="pay">pay：支付</option>
+                <option value="logistics_pay">logistics_pay：物流发货</option>
+                <option value="lucky_shop">lucky_shop：欧气商城</option>
+              </select>
+            </label>
+            <label>
+              <span>Flow 模块</span>
+              <input name="flow_module" placeholder="open_card_effects">
+            </label>
+            <p id="flowPreview" class="flow-preview"></p>
+          </div>
+
+          <div class="wide reuse-only hidden action-picker reuse-combobox">
+            <span>已有用例</span>
+            <input name="reuse_action_display" autocomplete="off" placeholder="搜索 case_id / 用例标题 / 参数名">
+            <input name="reuse_action" type="hidden">
+            <div id="reuseActionDropdown" class="reuse-action-dropdown hidden"></div>
+            <small id="reuseActionHint" class="field-hint"></small>
+          </div>
+          <label class="wide">
+            <span>params</span>
+            <input name="params" placeholder="请输入用例所需参数">
+          </label>
+          <label>
+            <span>接口错误模式</span>
+            <select name="api_error_check_mode"></select>
+          </label>
+          <label class="wide">
+            <span>允许报错接口</span>
+            <input name="allowed_errors" placeholder="/api/a|/api/b，normal 模式可留空">
+          </label>
+        </div>
+
+        <div class="section-title case-editor-steps-title generation-only">
+          <h2 class="section-heading">
+            用例步骤
+            <span id="caseStepCount" class="step-count">0</span>
+          </h2>
+          <button id="addStepBtn" class="btn btn-secondary btn-sm" type="button">添加步骤</button>
+        </div>
+        <div id="steps" class="steps generation-only"></div>
+
+        <div class="case-editor-footer">
+          <div class="section-title">
+            <h2>最终断言</h2>
+          </div>
+          <div class="grid">
+            <label>
+              <span>assert_type</span>
+              <select name="assert_type"></select>
+            </label>
+            <label class="wide">
+              <span>assert_value</span>
+              <input name="assert_value" placeholder="view:contains('支付订单')">
+            </label>
+          </div>
+        </div>
+      </form>
+
+      <section class="output">
+        <div class="section-title">
+          <h2>执行结果</h2>
+          <button id="clearOutputBtn" class="btn btn-ghost btn-sm" type="button">清空</button>
+        </div>
+        <pre id="output"></pre>
+      </section>
+    </section>
+  </main>
+
+  <template id="stepTemplate">
+    <div class="step-row">
+      <div class="step-index"></div>
+      <label class="public-step-action">
+        <span>公共动作</span>
+        <select name="public_action"></select>
+      </label>
+      <label class="step-action-field">
+        <span>动作</span>
+        <select name="step_action"></select>
+      </label>
+      <label class="locator-method-field">
+        <span>定位方式</span>
+        <select name="locator_method"></select>
+      </label>
+      <div class="candidate-toggle">
+        <span>高级定位</span>
+        <label class="inline-check">
+          <input name="use_candidates" type="checkbox">
+          <span>候选定位</span>
+        </label>
+      </div>
+      <label class="locator">
+        <span>定位值</span>
+        <input name="locator_value" placeholder="我的">
+      </label>
+      <label class="locator-options-field">
+        <span>高级参数</span>
+        <input name="locator_options" placeholder="tag=text,index=2">
+      </label>
+      <label class="step-value-field">
+        <span>附加值</span>
+        <input name="step_value" placeholder="输入内容或等待秒数">
+      </label>
+      <label class="step-remark-field">
+        <span>备注</span>
+        <input name="备注">
+      </label>
+      <details class="step-condition">
+        <summary>执行条件</summary>
+        <div class="condition-grid">
+          <label>
+            <span>条件类型</span>
+            <select name="condition_type"></select>
+          </label>
+          <label>
+            <span>条件定位方式</span>
+            <select name="condition_locator_method"></select>
+          </label>
+          <label class="locator">
+            <span>条件定位值</span>
+            <input name="condition_locator_value" placeholder="元素存在/不存在时填写">
+          </label>
+          <label>
+            <span>条件参数</span>
+            <input name="condition_options" placeholder="timeout=2,index=1">
+          </label>
+        </div>
+      </details>
+      <div class="step-actions">
+        <button class="btn-icon" type="button" data-action="up" title="上移" aria-label="上移">↑</button>
+        <button class="btn-icon" type="button" data-action="down" title="下移" aria-label="下移">↓</button>
+        <button class="btn btn-danger btn-sm" type="button" data-action="remove">删除</button>
+      </div>
+    </div>
+  </template>
+
+  <script>
+    document.write('<script src="' + (window.__MINITEST_BASE_PATH__ || '') + '/case_form.js"><\/script>');
+  </script>
+</body>
+</html>

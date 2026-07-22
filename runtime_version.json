@@ -1,0 +1,21 @@
+{
+  "runtime_version": "2026.07.22.1",
+  "runtime_type": "center_remote_agent_only",
+  "built_at": "2026-07-22 14:39:12",
+  "files": [
+    "central.env.example",
+    "requirements-center.txt",
+    "database/minitest_mysql_schema.sql",
+    "framework/__init__.py",
+    "framework/utils/__init__.py",
+    "framework/utils/mysql_case_repository.py",
+    "tools/case_editor_server.py",
+    "tools/case_editor/app.js",
+    "tools/case_editor/case_form.html",
+    "tools/case_editor/case_form.js",
+    "tools/case_editor/index.html",
+    "tools/case_editor/iteration_form.html",
+    "tools/case_editor/iteration_form.js",
+    "tools/case_editor/style.css"
+  ]
+}

@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Minitest Case Editor</title>
+  <script>
+    (function () {
+      var path = window.location.pathname.replace(/\/+$/, "") || "/";
+      var markers = ["/cases", "/public-actions", "/iterations", "/api", "/reports"];
+      var base = "";
+      for (var i = 0; i < markers.length; i += 1) {
+        var index = path.indexOf(markers[i]);
+        if (index > 0) {
+          base = path.slice(0, index);
+          break;
+        }
+      }
+      window.__MINITEST_BASE_PATH__ = base === "/" ? "" : base;
+      document.write('<link rel="stylesheet" href="' + window.__MINITEST_BASE_PATH__ + '/style.css">');
+    })();
+  </script>
+</head>
+<body>
+  <main class="app-shell app-shell-single">
+    <section class="workspace">
+      <nav class="tabs">
+        <button type="button" class="tab active" data-view="runtime">正式用例</button>
+        <a class="tab" href="/public-actions" data-view="publicActions">公共动作库</a>
+        <a class="tab" href="/iterations" data-view="iterations">需求迭代</a>
+        <button type="button" class="tab" data-view="runs">执行记录</button>
+      </nav>
+
+      <!-- 正式用例页 -->
+      <section id="runtimeView" class="view-panel active">
+        <div class="editor">
+          <div class="toolbar">
+            <div>
+              <h2>正式用例</h2>
+            </div>
+            <div class="toolbar-actions">
+              <span id="runtimeExecutionTargetHint" class="execution-target-status"></span>
+              <a id="newRuntimeCaseBtn" class="btn btn-secondary btn-sm" href="/cases/new">新建</a>
+              <button id="refreshRuntimeBtn" class="btn btn-secondary btn-sm" type="button">刷新</button>
+              <button id="runAllBtn" class="btn btn-primary btn-sm" type="button">执行全部</button>
+            </div>
+          </div>
+
+          <div class="runtime-controls">
+            <div class="runtime-filter-group">
+              <label>
+                <span>所属迭代</span>
+                <select id="runtimeIterationFilter">
+                  <option value="">全部迭代</option>
+                </select>
+              </label>
+              <label>
+                <span>每页数量</span>
+                <select id="runtimePageSize">
+                  <option value="10" selected>10</option>
+                  <option value="20">20</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+              </label>
+            </div>
+            <div class="runtime-pager">
+              <button id="runtimePrevBtn" class="btn btn-secondary btn-sm" type="button">上一页</button>
+              <span id="runtimePagination" class="hint"></span>
+              <button id="runtimeNextBtn" class="btn btn-secondary btn-sm" type="button">下一页</button>
+            </div>
+          </div>
+
+          <div class="runtime-table">
+            <div class="runtime-table-header">
+              <div>用例名称</div>
+              <div>所属迭代</div>
+              <div>用例步骤</div>
+              <div>所需参数</div>
+              <div>接口策略</div>
+              <div>忽略接口</div>
+              <div>状态</div>
+              <div>操作</div>
+            </div>
+            <div id="runtimeCases" class="runtime-list"></div>
+          </div>
+          <div id="runtimeDetail" class="runtime-detail hidden"></div>
+        </div>
+      </section>
+
+      <!-- 公共动作库页 -->
+      <section id="publicActionsView" class="view-panel">
+        <div class="editor public-action-editor">
+          <div class="toolbar">
+            <div>
+              <h2 id="publicActionsTitle">公共动作库</h2>
+              <p id="publicActionsHint" class="hint">来源：数据库公共动作配置</p>
+            </div>
+            <div class="toolbar-actions">
+              <a class="btn btn-secondary btn-sm public-action-new-only" href="/public-actions">返回</a>
+              <a class="btn btn-primary btn-sm public-action-library-only" href="/public-actions/new">新建</a>
+              <button id="refreshPublicActionsBtn" class="btn btn-secondary btn-sm" type="button">刷新</button>
+            </div>
+          </div>
+
+          <!-- 搜索/筛选区 -->
+          <div class="public-action-filters public-action-library-only">
+            <label class="public-search">
+              <span>搜索公共动作</span>
+              <input id="publicActionSearch" placeholder="搜索中文说明 / action / 定位值 / 参数名">
+            </label>
+            <label class="public-page-filter">
+              <span>所属页面</span>
+              <select id="publicActionPageFilter">
+                <option value="">全部页面</option>
+              </select>
+            </label>
+          </div>
+
+          <!-- 公共动作列表区：表头固定在 HTML，JS 只渲染下面的表体 -->
+          <div id="publicActionLibrary" class="public-action-library public-action-library-only">
+            <div class="public-action-table-header">
+              <div>所属页面</div>
+              <div>公共动作</div>
+              <div>步骤数</div>
+              <div>步骤摘要</div>
+              <div>参数</div>
+              <div>操作</div>
+            </div>
+            <div id="publicActionListContainer" class="public-action-list">
+            </div>
+          </div>
+          <div class="public-action-pager public-action-library-only">
+            <label>
+              <span>每页数量</span>
+              <select id="publicActionPageSize">
+                <option value="10" selected>10</option>
+                <option value="20">20</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+            <div class="runtime-pager">
+              <button id="publicActionPrevBtn" class="btn btn-secondary btn-sm" type="button">上一页</button>
+              <span id="publicActionPagination" class="hint"></span>
+              <button id="publicActionNextBtn" class="btn btn-secondary btn-sm" type="button">下一页</button>
+            </div>
+          </div>
+
+          <!-- 封装公共动作表单区 -->
+          <form id="publicActionDraftForm" class="public-action-draft public-action-form-only">
+            <div class="public-action-basic-fields">
+              <label>
+                <span>所属页面</span>
+                <select name="target"></select>
+              </label>
+              <label>
+                <span>公共动作名称</span>
+                <input name="action_name" placeholder="进入我的页面">
+              </label>
+              <label>
+                <span>中文说明</span>
+                <input name="desc" placeholder="进入商品详情">
+              </label>
+              <label class="wide">
+                <span>别名</span>
+                <input name="aliases" placeholder="进入商品,打开商品">
+              </label>
+            </div>
+            <div class="section-title public-action-steps-title">
+              <h2 class="section-heading">
+                动作步骤
+                <span id="publicActionStepCount" class="step-count">0</span>
+              </h2>
+              <button id="addPublicActionStepBtn" class="btn btn-secondary btn-sm" type="button">添加步骤</button>
+            </div>
+            <div id="publicActionSteps" class="public-action-steps"></div>
+            <div class="draft-actions">
+              <button id="savePublicActionBtn" class="btn btn-primary" type="button">保存到数据库</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- 执行记录页 -->
+      <section id="runsView" class="view-panel">
+        <div class="editor">
+          <div class="toolbar">
+            <div>
+              <h2>执行记录</h2>
+              <p class="hint">来源：mt_run_records / mt_reports</p>
+            </div>
+            <div class="toolbar-actions">
+              <button id="refreshRunsBtn" class="btn btn-secondary btn-sm" type="button">刷新</button>
+            </div>
+          </div>
+          <div class="run-table">
+            <div class="run-table-header">
+              <div>任务 ID</div>
+              <div>用例</div>
+              <div>执行位置</div>
+              <div>触发方式</div>
+              <div>状态</div>
+              <div>结果</div>
+              <div>开始时间</div>
+              <div>结束时间</div>
+              <div>报告</div>
+              <div>操作</div>
+            </div>
+            <div id="runJobs" class="job-list"></div>
+          </div>
+          <div class="section-title">
+            <h2>历史报告</h2>
+          </div>
+          <div class="report-table">
+            <div class="report-table-header">
+              <div>报告名称</div>
+              <div>用例</div>
+              <div>执行类型</div>
+              <div>状态</div>
+              <div>结果</div>
+              <div>更新时间</div>
+              <div>入口</div>
+            </div>
+            <div id="reportList" class="report-list"></div>
+          </div>
+        </div>
+      </section>
+      <!-- 需求迭代页 -->
+      <section id="iterationsView" class="view-panel">
+        <div class="editor">
+          <div class="toolbar">
+            <div>
+              <h2>需求迭代</h2>
+              <p class="hint">来源：mt_iteration，用于给正式用例分组</p>
+            </div>
+            <div class="toolbar-actions">
+              <label class="iteration-execution-target">
+                <span>执行位置</span>
+                <select id="iterationExecutionTarget">
+                  <option value="">中心机</option>
+                </select>
+              </label>
+              <a id="newIterationBtn" class="btn btn-primary btn-sm" href="/iterations/new">新建迭代</a>
+              <button id="refreshIterationsBtn" class="btn btn-secondary btn-sm" type="button">刷新</button>
+            </div>
+          </div>
+
+          <div class="iteration-table">
+            <div class="iteration-table-header">
+              <div>迭代编码</div>
+              <div>迭代名称</div>
+              <div>状态</div>
+              <div>计划周期</div>
+              <div>用例数</div>
+              <div>更新时间</div>
+              <div>操作</div>
+            </div>
+            <div id="iterationList" class="iteration-list"></div>
+          </div>
+          <div class="iteration-pager-bar">
+            <label>
+              <span>每页数量</span>
+              <select id="iterationsPageSize">
+                <option value="10" selected>10</option>
+                <option value="20">20</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+            <div class="iterations-pager">
+              <button id="iterationsPrevBtn" class="btn btn-secondary btn-sm" type="button">上一页</button>
+              <span id="iterationsPagination" class="hint"></span>
+              <button id="iterationsNextBtn" class="btn btn-secondary btn-sm" type="button">下一页</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 操作日志区：默认收起，点击日志按钮时展开 -->
+      <section class="output output-collapsed">
+        <div class="section-title">
+          <h2>操作日志</h2>
+          <div class="toolbar-actions">
+            <button id="toggleOutputBtn" class="btn btn-secondary btn-sm" type="button">展开</button>
+            <button id="clearOutputBtn" class="btn btn-ghost btn-sm" type="button">清空</button>
+          </div>
+        </div>
+        <pre id="output"></pre>
+      </section>
+    </section>
+  </main>
+
+  <div
+    id="deleteIterationDialog"
+    class="confirm-dialog-backdrop hidden"
+    role="presentation"
+    aria-hidden="true"
+  >
+    <section
+      class="confirm-dialog"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="deleteIterationDialogTitle"
+      aria-describedby="deleteIterationDialogDescription"
+    >
+      <div class="confirm-dialog-header">
+        <div>
+          <span class="confirm-dialog-eyebrow">危险操作</span>
+          <h2 id="deleteIterationDialogTitle">删除需求迭代</h2>
+        </div>
+        <button
+          id="closeDeleteIterationDialogBtn"
+          class="btn-icon confirm-dialog-close"
+          type="button"
+          title="关闭"
+          aria-label="关闭"
+        >×</button>
+      </div>
+
+      <p id="deleteIterationDialogDescription" class="confirm-dialog-description">
+        确定删除迭代“<strong id="deleteIterationName"></strong>”吗？
+      </p>
+
+      <div class="confirm-dialog-impact">
+        <span>关联用例</span>
+        <strong id="deleteIterationCaseCount">0 条</strong>
+        <p>删除后，这些用例将变为未分配迭代。该操作不会删除正式用例。</p>
+      </div>
+
+      <div class="confirm-dialog-actions">
+        <button id="cancelDeleteIterationBtn" class="btn btn-secondary" type="button">取消</button>
+        <button id="confirmDeleteIterationBtn" class="btn btn-danger confirm-danger-btn" type="button">确认删除</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- 步骤模板 -->
+  <template id="publicActionStepTemplate">
+    <div class="public-action-step-row">
+      <div class="step-index"></div>
+      <label class="step-action-field">
+        <span>动作</span>
+        <select name="step_action"></select>
+      </label>
+      <label class="locator-method-field">
+        <span>定位方式</span>
+        <select name="locator_method"></select>
+      </label>
+      <div class="candidate-toggle">
+        <span>高级定位</span>
+        <label class="inline-check">
+          <input name="use_candidates" type="checkbox">
+          <span>候选定位</span>
+        </label>
+      </div>
+      <label class="locator">
+        <span>定位值</span>
+        <input name="locator_value" placeholder="我的">
+      </label>
+      <label class="locator-options-field">
+        <span>高级参数</span>
+        <input name="locator_options" placeholder="tag=text,index=2">
+      </label>
+      <label class="step-value-field">
+        <span>附加值</span>
+        <input name="step_value" placeholder="输入内容或等待秒数">
+      </label>
+      <label class="step-remark-field">
+        <span>备注</span>
+        <input name="remark">
+      </label>
+      <details class="step-condition">
+        <summary>执行条件</summary>
+        <div class="condition-grid">
+          <label>
+            <span>条件类型</span>
+            <select name="condition_type"></select>
+          </label>
+          <label>
+            <span>条件定位方式</span>
+            <select name="condition_locator_method"></select>
+          </label>
+          <label class="locator">
+            <span>条件定位值</span>
+            <input name="condition_locator_value" placeholder="元素存在/不存在时填写">
+          </label>
+          <label>
+            <span>条件参数</span>
+            <input name="condition_options" placeholder="timeout=2,index=1">
+          </label>
+        </div>
+      </details>
+      <div class="step-actions">
+        <button class="btn-icon" type="button" data-action="up" title="上移" aria-label="上移">↑</button>
+        <button class="btn-icon" type="button" data-action="down" title="下移" aria-label="下移">↓</button>
+        <button class="btn btn-danger btn-sm" type="button" data-action="remove">删除</button>
+      </div>
+    </div>
+  </template>
+
+  <script>
+    document.write('<script src="' + (window.__MINITEST_BASE_PATH__ || '') + '/app.js"><\/script>');
+  </script>
+</body>
+</html>

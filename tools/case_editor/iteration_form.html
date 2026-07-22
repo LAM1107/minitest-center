@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Minitest Iteration Form</title>
+  <script>
+    (function () {
+      var path = window.location.pathname.replace(/\/+$/, "") || "/";
+      var markers = ["/cases", "/public-actions", "/iterations", "/api", "/reports"];
+      var base = "";
+      for (var i = 0; i < markers.length; i += 1) {
+        var index = path.indexOf(markers[i]);
+        if (index > 0) {
+          base = path.slice(0, index);
+          break;
+        }
+      }
+      window.__MINITEST_BASE_PATH__ = base === "/" ? "" : base;
+      document.write('<link rel="stylesheet" href="' + window.__MINITEST_BASE_PATH__ + '/style.css">');
+    })();
+  </script>
+</head>
+<body>
+  <main class="app-shell app-shell-single">
+    <section class="workspace">
+      <nav class="tabs">
+        <a class="tab" href="/cases">正式用例</a>
+        <a class="tab" href="/public-actions">公共动作库</a>
+        <a class="tab active" href="/iterations">需求迭代</a>
+      </nav>
+
+      <form id="iterationEditorForm" class="editor editor-page iteration-editor">
+        <input name="iteration_id" type="hidden">
+
+        <div class="toolbar iteration-editor-toolbar">
+          <div>
+            <h2 id="iterationEditorTitle">新建迭代</h2>
+            <p class="hint">维护迭代信息，并选择本次迭代需要执行的正式用例。</p>
+          </div>
+          <div class="toolbar-actions">
+            <a class="btn btn-secondary" href="/iterations">返回列表</a>
+            <button id="saveIterationBtn" class="btn btn-primary" type="submit">保存迭代</button>
+          </div>
+        </div>
+
+        <div class="grid iteration-editor-grid">
+          <label>
+            <span>迭代编码</span>
+            <input name="iteration_code" required placeholder="ITER_2026_07">
+          </label>
+          <label>
+            <span>迭代名称</span>
+            <input name="iteration_name" required placeholder="7 月支付流程迭代">
+          </label>
+          <label>
+            <span>状态</span>
+            <select name="status">
+              <option value="planning">规划中</option>
+              <option value="active">进行中</option>
+              <option value="completed">已完成</option>
+              <option value="archived">已归档</option>
+            </select>
+          </label>
+          <label>
+            <span>开始日期</span>
+            <input name="start_date" type="date">
+          </label>
+          <label>
+            <span>结束日期</span>
+            <input name="end_date" type="date">
+          </label>
+          <label class="wide">
+            <span>迭代备注</span>
+            <textarea name="description" rows="2" placeholder="填写本次迭代的测试范围或说明"></textarea>
+          </label>
+        </div>
+
+        <section class="iteration-case-picker">
+          <div class="section-title iteration-case-picker-title">
+            <div>
+              <h2>选择正式用例</h2>
+              <p class="hint">可多选，列表固定高度并支持滚动；选择其他迭代的用例后，该用例将移动到当前迭代。</p>
+            </div>
+            <span id="selectedCaseCount" class="selection-count">已选 0 项</span>
+          </div>
+
+          <div class="iteration-case-tools">
+            <label class="iteration-case-search">
+              <span>搜索用例</span>
+              <input id="caseSearchInput" type="search" placeholder="输入 case_id、标题或所属目录">
+            </label>
+            <div class="toolbar-actions">
+              <button id="selectVisibleCasesBtn" class="btn btn-secondary btn-sm" type="button">全选当前结果</button>
+              <button id="clearSelectedCasesBtn" class="btn btn-ghost btn-sm" type="button">清空选择</button>
+            </div>
+          </div>
+
+          <div class="iteration-case-table">
+            <div class="iteration-case-table-header">
+              <div>选择</div>
+              <div>case_id</div>
+              <div>用例标题</div>
+              <div>当前迭代</div>
+              <div>状态</div>
+              <div>步骤数</div>
+            </div>
+            <div id="iterationCaseList" class="iteration-case-list"></div>
+          </div>
+        </section>
+
+        <div id="iterationFormMessage" class="form-message" role="status"></div>
+      </form>
+    </section>
+  </main>
+
+  <script>
+    document.write('<script src="' + (window.__MINITEST_BASE_PATH__ || '') + '/iteration_form.js"><\/script>');
+  </script>
+</body>
+</html>
