@@ -17,4 +17,4 @@ if not exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 
-".venv\Scripts\python.exe" tools\case_editor_server.py --host 127.0.0.1 --port 8765 --no-open
+".venv\Scripts\python.exe" tools\case_editor_server.py --host 0.0.0.0 --port 8765 --no-open

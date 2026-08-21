@@ -34,7 +34,7 @@ REPORTS_DIR = PROJECT_ROOT / "reports"
 STATIC_DIR = PROJECT_ROOT / "tools" / "case_editor"
 RUN_JOBS = {}
 RUN_JOBS_LOCK = threading.Lock()
-SERVER_VERSION = "case-editor-20260722-center-runtime-v23"
+SERVER_VERSION = "case-editor-20260723-center-runtime-v24"
 # 反向代理将服务挂在 /minitest 等子路径时使用；空值表示根路径部署。
 URL_PREFIX = ""
 
@@ -189,10 +189,10 @@ def param_names_from_inputs(inputs):
 
 
 def list_reusable_cases():
-    """Return all DB cases that can be reused as step templates."""
+    """Return lightweight DB case summaries that can be reused as templates."""
     cases = []
     seen = set()
-    for row in read_runtime_cases_all():
+    for row in case_repository().list_reusable_case_options():
         action = str(row.get("case_id") or "").strip()
         if not action or action in seen:
             continue
@@ -278,8 +278,8 @@ def clone_runtime_case_steps(case_data):
     return result
 
 
-def list_public_step_actions_for_options(keyword="", page_code="", page=1, page_size=10):
-    """给 /api/options 使用的公共动作查询入口，支持页面和关键字筛选。"""
+def list_public_actions_page(keyword="", page_code="", page=1, page_size=10):
+    """Query public actions for the dedicated paginated API."""
     return case_repository().list_public_actions(
         keyword=keyword if keyword else None,
         page_code=page_code if page_code else None,
@@ -769,6 +769,15 @@ class CaseEditorHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def send_editor_page(self, filename):
+        """Serve an editor page with the configured reverse-proxy mount path."""
+        html = (STATIC_DIR / filename).read_text(encoding="utf-8")
+        bootstrap = (
+            "<script>window.__MINITEST_SERVER_BASE_PATH__ = "
+            f"{json.dumps(URL_PREFIX, ensure_ascii=False)};</script>"
+        )
+        return self.send_html(html.replace("<head>", f"<head>\n  {bootstrap}", 1))
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.end_headers()
@@ -891,52 +900,44 @@ class CaseEditorHandler(SimpleHTTPRequestHandler):
                         "error": str(exc),
                     }
                 )
+        if normalized_path == "/api/public_actions":
+            try:
+                keyword = query.get("keyword", [""])[0]
+                page_code = query.get("page_code", [""])[0]
+                page = positive_int(query.get("page", ["1"])[0], 1)
+                page_size = positive_int(query.get("page_size", ["10"])[0], 10)
+                return self.send_json(
+                    list_public_actions_page(
+                        keyword=keyword,
+                        page_code=page_code,
+                        page=page,
+                        page_size=page_size,
+                    )
+                )
+            except Exception as exc:
+                return self.send_json({"ok": False, "error": str(exc)}, 500)
+        if normalized_path == "/api/public_action_pages":
+            try:
+                return self.send_json(
+                    {"page_options": public_action_page_options()}
+                )
+            except Exception as exc:
+                return self.send_json({"ok": False, "error": str(exc)}, 500)
+        if normalized_path == "/api/iteration_options":
+            try:
+                return self.send_json(
+                    {"iteration_options": case_repository().list_iteration_options()}
+                )
+            except Exception as exc:
+                return self.send_json({"ok": False, "error": str(exc)}, 500)
+        if normalized_path == "/api/reusable_cases":
+            try:
+                return self.send_json({"reusable_cases": list_reusable_cases()})
+            except Exception as exc:
+                return self.send_json({"ok": False, "error": str(exc)}, 500)
         if normalized_path == "/api/options":
-            # options 是前端的“基础配置接口”：
-            # 1. 用例编辑页用它填充步骤动作、定位方式、公共动作下拉
-            # 2. 公共动作库用它加载公共动作列表，也可带 keyword/page_code 做筛选
-            keyword = query.get("keyword", [""])[0]
-            page_code = query.get("page_code", [""])[0]
-            page = positive_int(query.get("page", ["1"])[0], 1)
-            page_size = positive_int(query.get("page_size", ["10"])[0], 10)
-            option_errors = {}
-            public_step_actions_pagination = {
-                "page": page,
-                "page_size": page_size,
-                "limit": page_size,
-                "offset": (page - 1) * page_size,
-                "total": 0,
-                "total_pages": 1,
-            }
-            try:
-                public_action_result = list_public_step_actions_for_options(
-                    keyword=keyword,
-                    page_code=page_code,
-                    page=page,
-                    page_size=page_size,
-                )
-                public_actions = public_action_result.get("actions", [])
-                public_step_actions_pagination = public_action_result.get(
-                    "pagination",
-                    public_step_actions_pagination,
-                )
-            except Exception as exc:
-                public_actions = []
-                # 不让一个局部查询失败拖垮整个 options 接口，但把错误返回给前端日志。
-                option_errors["public_step_actions"] = str(exc)
-            try:
-                page_options = public_action_page_options()
-            except Exception as exc:
-                page_options = []
-                # 页面枚举失败时，前端仍可展示其他 options，错误会显示在日志里。
-                option_errors["page_options"] = str(exc)
-            try:
-                # 编辑用例时需要完整迭代下拉，不能跟随公共动作列表分页。
-                iteration_options = case_repository().list_iterations()
-            except Exception as exc:
-                iteration_options = []
-                option_errors["iteration_options"] = str(exc)
-            reusable_cases = list_reusable_cases()
+            # This endpoint deliberately contains only static editor vocabulary.
+            # Database-backed option lists are loaded from dedicated APIs on demand.
             return self.send_json(
                 {
                     "server_version": SERVER_VERSION,
@@ -959,17 +960,23 @@ class CaseEditorHandler(SimpleHTTPRequestHandler):
                     ],
                     "locator_methods": ["", "text", "class", "class_text", "src", "xpath"],
                     "assert_types": ["element_exists", "exist_page"],
-                    "page_options": page_options,
-                    "iteration_options": iteration_options,
-                    "reusable_cases": reusable_cases,
-                    # page_options 是页面枚举；public_step_actions_pagination 才是公共动作列表的分页/limit 信息。
-                    "public_step_actions_pagination": public_step_actions_pagination,
-                    # 兼容旧前端字段名，后续可以删掉。
-                    "public_action_pagination": public_step_actions_pagination,
-                    "public_step_actions": public_actions,
-                    "errors": option_errors,
                 }
             )
+        if normalized_path in {"/", "/cases", "/cases/", "/iterations", "/iterations/"}:
+            return self.send_editor_page("index.html")
+        if normalized_path in {"/cases/new", "/cases/edit"}:
+            return self.send_editor_page("case_form.html")
+        if normalized_path in {"/iterations/new", "/iterations/edit"}:
+            return self.send_editor_page("iteration_form.html")
+        if normalized_path in {
+            "/public-actions",
+            "/public-actions/",
+            "/public-actions/new",
+            "/public-actions/new/",
+            "/public-actions/edit",
+            "/public-actions/edit/",
+        }:
+            return self.send_editor_page("index.html")
         return super().do_GET()
 
     def do_POST(self):

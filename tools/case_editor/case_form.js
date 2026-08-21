@@ -14,7 +14,7 @@ const state = {
   centerExecutionEnabled: true,
 };
 
-const EXPECTED_SERVER_VERSION = "case-editor-20260722-center-runtime-v23";
+const EXPECTED_SERVER_VERSION = "case-editor-20260723-center-runtime-v24";
 const EXECUTION_TARGET_STORAGE_KEY = "minitest.execution_target";
 const LEGACY_EXECUTION_TARGET_STORAGE_KEY = "minitest.iteration_execution_target";
 const ROUTE_MARKERS = ["/cases", "/public-actions", "/api", "/reports"];
@@ -972,9 +972,22 @@ function updateNormalizedHint() {
 }
 
 async function loadOptions() {
-  // 用例编辑页需要公共动作下拉尽量完整；公共动作库列表页才使用 10 条分页展示。
-  const data = await api("/api/options?page=1&page_size=200");
-  state.options = data;
+  // Fixed vocabularies and database-backed dropdown data use separate APIs.
+  // The form still loads them together, but one slow list no longer delays /api/options.
+  const [base, pages, iterations, reusableCases, publicActions] = await Promise.all([
+    api("/api/options"),
+    api("/api/public_action_pages"),
+    api("/api/iteration_options"),
+    api("/api/reusable_cases"),
+    api("/api/public_actions?page=1&page_size=200"),
+  ]);
+  state.options = {
+    ...base,
+    page_options: pages.page_options || [],
+    iteration_options: iterations.iteration_options || [],
+    reusable_cases: reusableCases.reusable_cases || [],
+    public_step_actions: publicActions.actions || [],
+  };
   if (state.options.server_version && state.options.server_version !== EXPECTED_SERVER_VERSION) {
     log(`检测到旧后端版本 ${state.options.server_version}，请重启 case_editor_server.py`);
   }

@@ -213,7 +213,7 @@ async function init() {
   const iterationId = params.get("iteration_id") || params.get("id") || "";
 
   try {
-    const options = await api("/api/options?page=1&page_size=10");
+    const options = await api("/api/reusable_cases");
     state.reusableCases = options.reusable_cases || [];
 
     if (iterationId) {

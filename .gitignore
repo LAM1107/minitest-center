@@ -1,0 +1,56 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+.envrc
+
+# Test execution outputs
+outputs/
+final_report/
+simple_report.html
+reports/
+release/
+after_click_*
+after_confirm_*
+element_not_found
+error_force_click_*
+debug_evaluate.py
+debug_page_data.py
+
+# Runtime logs and process files
+*.log
+*.out
+*.pid
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Machine-specific configuration and secrets
+config.json
+.env
+.env.*
+!.env.example
+!central.env.example
+
+# Private certificates, keys and local database backups
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+database/backups/
+minitest_*.sql
+
+# Local IDE settings
+.idea/
+.vscode/

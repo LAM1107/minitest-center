@@ -626,6 +626,25 @@ class MySqlCaseRepository:
             runtime_cases.append(self._runtime_case_summary(row, len(row.get("steps") or [])))
         return runtime_cases
 
+    def list_reusable_case_options(self):
+        """Return lightweight case rows for reuse dropdowns without loading every step."""
+        with self.connect() as (_, cursor):
+            cursor.execute(
+                """
+                SELECT c.case_id, c.title, c.flow_group_hint, c.inputs, c.enabled,
+                       c.iteration_id, i.iteration_code, i.iteration_name,
+                       (
+                         SELECT COUNT(*)
+                         FROM mt_case_steps s
+                         WHERE s.case_id = c.case_id AND s.enabled = 1
+                       ) AS steps_count
+                FROM mt_cases c
+                LEFT JOIN mt_iteration i ON i.id = c.iteration_id
+                ORDER BY c.sort_order ASC, c.id ASC
+                """
+            )
+            return list(cursor.fetchall())
+
     def list_runtime_cases_page(self, page=1, page_size=10, iteration_id=None):
         page = max(int(page or 1), 1)
         page_size = min(max(int(page_size or 10), 1), 200)
@@ -704,6 +723,21 @@ class MySqlCaseRepository:
                 FROM mt_public_action_pages
                 {where}
                 ORDER BY sort_order ASC, id ASC, page_code ASC
+                """
+            )
+            return list(cursor.fetchall())
+
+    def list_iteration_options(self):
+        """Return only the fields required by iteration select controls."""
+        with self.connect() as (_, cursor):
+            cursor.execute(
+                """
+                SELECT id AS iteration_id, iteration_code, iteration_name, status
+                FROM mt_iteration
+                WHERE deleted_at IS NULL
+                ORDER BY
+                    FIELD(status, 'active', 'planning', 'completed', 'archived'),
+                    id DESC
                 """
             )
             return list(cursor.fetchall())

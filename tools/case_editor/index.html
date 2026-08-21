@@ -8,12 +8,14 @@
     (function () {
       var path = window.location.pathname.replace(/\/+$/, "") || "/";
       var markers = ["/cases", "/public-actions", "/iterations", "/api", "/reports"];
-      var base = "";
-      for (var i = 0; i < markers.length; i += 1) {
-        var index = path.indexOf(markers[i]);
-        if (index > 0) {
-          base = path.slice(0, index);
-          break;
+      var base = window.__MINITEST_SERVER_BASE_PATH__ || "";
+      if (!base) {
+        for (var i = 0; i < markers.length; i += 1) {
+          var index = path.indexOf(markers[i]);
+          if (index > 0) {
+            base = path.slice(0, index);
+            break;
+          }
         }
       }
       window.__MINITEST_BASE_PATH__ = base === "/" ? "" : base;

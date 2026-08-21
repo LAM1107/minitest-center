@@ -48,10 +48,14 @@ const state = {
   publicActionFilterTimer: null,
   publicActionEditId: "",
   publicActionEditEnabled: 1,
+  publicActionPagesLoaded: false,
+  optionsLoaded: false,
+  iterationOptionsLoaded: false,
+  executionAgentsLoaded: false,
 };
 
 // 管理页既支持根路径，也支持反向代理挂载到 /minitest 之类的子路径。
-const EXPECTED_SERVER_VERSION = "case-editor-20260722-center-runtime-v23";
+const EXPECTED_SERVER_VERSION = "case-editor-20260723-center-runtime-v24";
 const ROUTE_MARKERS = ["/cases", "/public-actions", "/iterations", "/api", "/reports"];
 const APP_BASE_PATH = normalizeBasePath(window.__MINITEST_BASE_PATH__ || inferBasePath());
 const EMBED_MODE = new URLSearchParams(window.location.search).get("embed") === "1";
@@ -326,7 +330,7 @@ function resetPublicActionDraft() {
   ensurePublicActionSteps();
 }
 
-function switchView(view) {
+function switchView(view, { loadData = true } = {}) {
   state.activeView = view;
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.view === view);
@@ -338,10 +342,11 @@ function switchView(view) {
   if (!activePanel) return;
   activePanel.classList.add("active");
 
-  if (view === "runtime") loadRuntimeCases();
-  if (view === "publicActions") renderPublicActionLibrary();
-  if (view === "iterations") loadIterations();
-  if (view === "runs") loadRuns();
+  if (loadData) {
+    loadViewData(view).catch((error) => {
+      log(`加载页面数据失败: ${error.message}`);
+    });
+  }
   syncRouteMode();
 }
 
@@ -457,6 +462,7 @@ async function loadExecutionAgents() {
     state.remoteAgentsEnabled = Boolean(data.remote_agents_enabled);
     state.centerExecutionEnabled = data.center_execution_enabled !== false;
     state.executionAgents = data.agents || [];
+    state.executionAgentsLoaded = true;
   } catch (error) {
     // 临时读取失败时不清掉浏览器中的远程选择，避免网络波动把任务意外改派到中心机。
     state.remoteAgentsEnabled = false;
@@ -538,7 +544,6 @@ async function loadIterations() {
     total: state.iterations.length,
     total_pages: 1,
   };
-  await loadExecutionAgents();
   renderIterations();
 }
 
@@ -609,7 +614,7 @@ async function deleteIteration(iteration) {
   );
 
   await loadIterations();
-  await loadOptions();
+  await loadIterationOptions();
   await loadRuntimeCases();
 }
 
@@ -1040,7 +1045,7 @@ async function loadPublicActionForEdit(publicActionId) {
   if (!publicActionId) throw new Error("public_action_id 不能为空");
   const data = await api(`/api/public_action_edit?public_action_id=${encodeURIComponent(publicActionId)}`);
   setPublicActionDraftData(data.public_action);
-  switchView("publicActions");
+  switchView("publicActions", { loadData: false });
   log(`已加载公共动作编辑: ${data.public_action.action_name || publicActionId}`);
   return data.public_action;
 }
@@ -1054,7 +1059,8 @@ async function savePublicActionDraft() {
   });
   log(`${isEdit ? "公共动作已更新" : "公共动作已保存"}: ${response.result.action_name}`);
   const savedPublicActionId = response.result.public_action_id || state.publicActionEditId;
-  await loadOptions();
+  await loadPublicActionPages(true);
+  await loadPublicActions(currentPublicActionFilters());
   if (isEdit && savedPublicActionId) {
     await loadPublicActionForEdit(savedPublicActionId);
   }
@@ -1477,7 +1483,7 @@ async function showJobLog(job) {
 }
 
 function currentPublicActionFilters() {
-  // 公共动作库页面当前的筛选条件，最终会拼到 /api/options 的 query string 上。
+  // 公共动作库页面当前的筛选条件，最终会拼到专用公共动作接口。
   const pagination = state.publicActionPagination;
   return {
     keyword: (publicActionSearch?.value || "").trim(),
@@ -1487,38 +1493,106 @@ function currentPublicActionFilters() {
   };
 }
 
-function buildOptionsUrl(filters = {}) {
-  // 公共动作库使用 /api/options 的分页能力；不传 filters 时由后端使用默认第 1 页、每页 10 条。
+function buildPublicActionsUrl(filters = {}) {
   const params = new URLSearchParams();
   if (filters.keyword) params.set("keyword", filters.keyword);
   if (filters.page_code) params.set("page_code", filters.page_code);
   if (filters.page) params.set("page", filters.page);
   if (filters.page_size) params.set("page_size", filters.page_size);
   const query = params.toString();
-  return query ? `/api/options?${query}` : "/api/options";
+  return query ? `/api/public_actions?${query}` : "/api/public_actions";
 }
 
-async function loadOptions(filters = {}) {
-  const data = await api(buildOptionsUrl(filters));
-  state.options = data;
-  state.publicActionPagination = data.public_step_actions_pagination || data.public_action_pagination || {
-    page: 1,
-    page_size: Number(publicActionPageSizeEl?.value || DEFAULT_PUBLIC_ACTION_PAGE_SIZE),
-    total: data.public_step_actions?.length || 0,
-    total_pages: 1,
-  };
+async function loadOptions() {
+  const data = await api("/api/options");
+  state.options = { ...state.options, ...data };
+  state.optionsLoaded = true;
   if (state.options.server_version && state.options.server_version !== EXPECTED_SERVER_VERSION) {
     log(`检测到旧后端版本 ${state.options.server_version}，请重启 case_editor_server.py`);
   }
   for (const [name, message] of Object.entries(state.options.errors || {})) {
     log(`options 查询失败: ${name}: ${message}`);
   }
+}
+
+async function loadIterationOptions() {
+  const data = await api("/api/iteration_options");
+  state.options.iteration_options = data.iteration_options || [];
+  state.iterationOptionsLoaded = true;
   fillRuntimeIterationFilter();
+}
+
+async function loadPublicActionPages(force = false) {
+  if (state.publicActionPagesLoaded && !force) return;
+  const data = await api("/api/public_action_pages");
+  state.options.page_options = data.page_options || [];
+  state.publicActionPagesLoaded = true;
   fillPublicActionDraftTargets();
   fillPublicActionPageFilter();
   ensurePublicActionSteps();
+}
+
+async function loadPublicActions(filters = {}) {
+  const data = await api(buildPublicActionsUrl(filters));
+  state.options.public_step_actions = data.actions || [];
+  state.publicActionPagination = data.pagination || {
+    page: 1,
+    page_size: Number(publicActionPageSizeEl?.value || DEFAULT_PUBLIC_ACTION_PAGE_SIZE),
+    total: state.options.public_step_actions.length,
+    total_pages: 1,
+  };
   renderPublicActionLibrary();
   renderPublicActionPagination();
+}
+
+async function loadPublicActionLibrary(filters = {}) {
+  await loadPublicActionPages();
+  await loadPublicActions(filters);
+}
+
+async function ensureOptionsLoaded() {
+  if (state.optionsLoaded) return;
+  await loadOptions();
+}
+
+async function ensureIterationOptionsLoaded() {
+  if (state.iterationOptionsLoaded) return;
+  await loadIterationOptions();
+}
+
+async function ensureExecutionAgentsLoaded() {
+  if (state.executionAgentsLoaded) return;
+  await loadExecutionAgents();
+}
+
+async function loadViewData(view) {
+  if (view === "runtime") {
+    await Promise.all([
+      ensureOptionsLoaded(),
+      ensureIterationOptionsLoaded(),
+      ensureExecutionAgentsLoaded(),
+    ]);
+    await loadRuntimeCases();
+    return;
+  }
+
+  if (view === "publicActions") {
+    await ensureOptionsLoaded();
+    await loadPublicActionLibrary();
+    return;
+  }
+
+  if (view === "iterations") {
+    await Promise.all([
+      loadIterations(),
+      ensureExecutionAgentsLoaded(),
+    ]);
+    return;
+  }
+
+  if (view === "runs") {
+    await loadRuns();
+  }
 }
 
 function fillRuntimeIterationFilter() {
@@ -1544,7 +1618,7 @@ function reloadPublicActionLibraryWithFilters(resetPage = false) {
   window.clearTimeout(state.publicActionFilterTimer);
   state.publicActionFilterTimer = window.setTimeout(async () => {
     try {
-      await loadOptions(currentPublicActionFilters());
+      await loadPublicActions(currentPublicActionFilters());
     } catch (error) {
       log(`刷新公共动作库失败: ${error.message}`);
     }
@@ -1710,7 +1784,7 @@ document.querySelector("#refreshPublicActionsBtn").addEventListener("click", asy
     if (publicActionSearch) publicActionSearch.value = "";
     if (publicActionPageFilter) publicActionPageFilter.value = "";
     state.publicActionPagination.page = 1;
-    await loadOptions(currentPublicActionFilters());
+    await loadPublicActions(currentPublicActionFilters());
     log("公共动作库已刷新");
   } catch (error) {
     log(`刷新公共动作库失败: ${error.message}`);
@@ -1741,7 +1815,7 @@ publicActionPageSizeEl.addEventListener("change", async () => {
   state.publicActionPagination.page = 1;
   state.publicActionPagination.page_size = Number(publicActionPageSizeEl.value || DEFAULT_PUBLIC_ACTION_PAGE_SIZE);
   try {
-    await loadOptions(currentPublicActionFilters());
+    await loadPublicActions(currentPublicActionFilters());
   } catch (error) {
     log(`刷新公共动作库失败: ${error.message}`);
   }
@@ -1751,7 +1825,7 @@ publicActionPrevBtn.addEventListener("click", async () => {
   if (state.publicActionPagination.page <= 1) return;
   state.publicActionPagination.page -= 1;
   try {
-    await loadOptions(currentPublicActionFilters());
+    await loadPublicActions(currentPublicActionFilters());
   } catch (error) {
     log(`刷新公共动作库失败: ${error.message}`);
   }
@@ -1761,7 +1835,7 @@ publicActionNextBtn.addEventListener("click", async () => {
   if (state.publicActionPagination.page >= state.publicActionPagination.total_pages) return;
   state.publicActionPagination.page += 1;
   try {
-    await loadOptions(currentPublicActionFilters());
+    await loadPublicActions(currentPublicActionFilters());
   } catch (error) {
     log(`刷新公共动作库失败: ${error.message}`);
   }
@@ -1791,18 +1865,15 @@ if (cancelPublicActionEditBtn) {
     if (iterationPageSizeEl) {
       iterationPageSizeEl.value = String(DEFAULT_ITERATION_PAGE_SIZE);
     }
-    await loadOptions();
-    await loadExecutionAgents();
-    await loadRuntimeCases();
-    await loadRuns();
 
     const params = new URLSearchParams(window.location.search);
     const selectedCaseId = params.get("case_id");
     const publicActionEditId = params.get("public_action_id") || params.get("id");
-    const view = params.get("view") || routeView();
+    const view = params.get("view") || routeView() || "runtime";
+    switchView(view, { loadData: false });
+    await loadViewData(view);
+
     if (selectedCaseId) await loadRuntimeCaseDetail(selectedCaseId);
-    if (["runtime", "publicActions", "iterations", "runs"].includes(view)) switchView(view);
-    else syncRouteMode();
     if (currentPath() === "/public-actions/edit" && publicActionEditId) {
       await loadPublicActionForEdit(publicActionEditId);
     }
