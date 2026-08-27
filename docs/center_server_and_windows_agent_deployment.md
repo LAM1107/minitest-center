@@ -226,34 +226,43 @@ MINITEST_AGENT_SERVER=https://minitest.example.com/minitest
 
 ## 7. 配置为 systemd 服务
 
-推荐不要长期依赖 SSH 窗口运行中心服务。创建：
-
-`/etc/systemd/system/minitest-center.service`
-
-```ini
-[Unit]
-Description=Minitest Center Service
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/minitest-center
-ExecStart=/opt/minitest-center/.venv/bin/python /opt/minitest-center/tools/case_editor_server.py --host 0.0.0.0 --port 8765 --no-open
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-如果使用 Nginx/Caddy 反向代理，将 `ExecStart` 中的 `--host 0.0.0.0` 改为 `--host 127.0.0.1`。
-
-启用并查看日志：
+`start_center.sh` 是前台启动脚本，适合手动验证。正式部署请安装仓库提供的 systemd 服务：
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now minitest-center
+cd /opt/minitest-center
+chmod +x install_center_service.sh
+sudo ./install_center_service.sh
+```
+
+默认按 Nginx/Caddy 反向代理场景监听 `127.0.0.1:8765`。安装脚本会自动创建：
+
+```text
+/etc/systemd/system/minitest-center.service
+```
+
+并立即启动、设置开机自启和异常自动重启。
+
+如果不使用反向代理，需要直接通过 `http://服务器IP:8765` 访问：
+
+```bash
+sudo ./install_center_service.sh --host 0.0.0.0
+```
+
+如果需要指定运行用户或端口：
+
+```bash
+sudo ./install_center_service.sh \
+  --user ubuntu \
+  --host 127.0.0.1 \
+  --port 8765
+```
+
+管理服务和查看日志：
+
+```bash
 sudo systemctl status minitest-center
+sudo systemctl restart minitest-center
+sudo systemctl stop minitest-center
 journalctl -u minitest-center -f
 ```
 
