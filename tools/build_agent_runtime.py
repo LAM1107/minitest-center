@@ -30,6 +30,7 @@ RUNTIME_FILES = (
     "framework/pages/reward_page.py",
     "framework/pages/backpack_page.py",
     "framework/utils/__init__.py",
+    "framework/utils/public_action.py",
     "framework/utils/action_executor.py",
     "framework/utils/mysql_case_repository.py",
     "framework/utils/report_manager.py",
