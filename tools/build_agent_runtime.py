@@ -212,6 +212,152 @@ MINITEST_AGENT_SERVER=http://127.0.0.1:8765
 以及截图、日志和数据库密码。
 """
 
+DEVTOOLS_FOREGROUND_HELPER = r'''"""Keep WeChat DevTools in the foreground for Minium IDE automation."""
+
+import ctypes
+import os
+import threading
+from ctypes import wintypes
+
+
+def _window_candidates():
+    if os.name != "nt":
+        return []
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    enum_windows_proc = ctypes.WINFUNCTYPE(
+        ctypes.c_bool,
+        wintypes.HWND,
+        wintypes.LPARAM,
+    )
+    candidates = []
+    process_query_limited_information = 0x1000
+
+    def process_name(process_id):
+        handle = kernel32.OpenProcess(
+            process_query_limited_information,
+            False,
+            process_id,
+        )
+        if not handle:
+            return ""
+        try:
+            size = wintypes.DWORD(1024)
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if kernel32.QueryFullProcessImageNameW(
+                handle,
+                0,
+                buffer,
+                ctypes.byref(size),
+            ):
+                return buffer.value.rsplit("\\", 1)[-1].lower()
+            return ""
+        finally:
+            kernel32.CloseHandle(handle)
+
+    def callback(hwnd, _lparam):
+        process_id = wintypes.DWORD()
+        thread_id = user32.GetWindowThreadProcessId(
+            hwnd,
+            ctypes.byref(process_id),
+        )
+        if not thread_id:
+            return True
+
+        title_length = user32.GetWindowTextLengthW(hwnd)
+        title_buffer = ctypes.create_unicode_buffer(title_length + 1)
+        user32.GetWindowTextW(hwnd, title_buffer, title_length + 1)
+        title = title_buffer.value.lower()
+        name = process_name(process_id.value)
+        is_primary_devtools_process = name in {
+            "wechatdevtools.exe",
+            "微信开发者工具.exe",
+        }
+        is_runtime_process = name == "wechatappex.exe"
+        has_devtools_title = (
+            "微信开发者工具" in title
+            or "wechat developer tools" in title
+        )
+        if is_primary_devtools_process or is_runtime_process or has_devtools_title:
+            score = (
+                int(is_primary_devtools_process) * 10
+                + int(has_devtools_title) * 5
+                + int(is_runtime_process)
+            )
+            score += int(bool(user32.IsWindowVisible(hwnd)))
+            candidates.append((score, hwnd, thread_id))
+        return True
+
+    user32.EnumWindows(enum_windows_proc(callback), 0)
+    return sorted(candidates, key=lambda item: item[0], reverse=True)
+
+
+def activate():
+    """Restore and foreground the best matching DevTools top-level window."""
+    candidates = _window_candidates()
+    if not candidates:
+        return False
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    _, target_window, target_thread = candidates[0]
+    foreground_window = user32.GetForegroundWindow()
+    if foreground_window == target_window:
+        return True
+
+    current_thread = kernel32.GetCurrentThreadId()
+    foreground_thread = (
+        user32.GetWindowThreadProcessId(foreground_window, None)
+        if foreground_window
+        else 0
+    )
+    attached_threads = []
+    for thread_id in (foreground_thread, target_thread):
+        if thread_id and thread_id != current_thread and thread_id not in attached_threads:
+            if user32.AttachThreadInput(current_thread, thread_id, True):
+                attached_threads.append(thread_id)
+
+    try:
+        user32.ShowWindow(target_window, 9)
+        user32.BringWindowToTop(target_window)
+        return bool(user32.SetForegroundWindow(target_window))
+    finally:
+        for thread_id in reversed(attached_threads):
+            user32.AttachThreadInput(current_thread, thread_id, False)
+
+
+class ForegroundMonitor:
+    def __init__(self, interval=0.8):
+        self.interval = max(float(interval), 0.2)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="minium-devtools-foreground",
+            daemon=True,
+        )
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=2)
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                activate()
+            except Exception:
+                pass
+            self._stop.wait(self.interval)
+
+
+def start_foreground_monitor():
+    return ForegroundMonitor().start()
+'''
+
 
 def write_windows_text(path, content, encoding="utf-8"):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -227,6 +373,364 @@ def copy_runtime_files(source_root, package_dir):
         target = package_dir / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
+
+
+def replace_once(path, old, new):
+    text = path.read_text(encoding="utf-8")
+    if old not in text:
+        raise RuntimeError(f"无法应用执行机兼容补丁，未找到预期内容: {path}")
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
+def patch_runtime_files(package_dir):
+    """为新版执行机注入 Windows DevTools 前台和元素定位兼容层。"""
+    helper_path = package_dir / "tools" / "devtools_foreground.py"
+    write_windows_text(helper_path, DEVTOOLS_FOREGROUND_HELPER)
+
+    base_page_path = package_dir / "framework" / "base" / "base_page.py"
+    replace_once(
+        base_page_path,
+        "import logging\nimport time\n",
+        "import logging\nimport re\nimport time\n",
+    )
+    old_find_element = (
+        '''    def find_element(self, selector, max_timeout=10):
+        """轮询查找元素；超时后截图并抛出包含当前页面路径的异常。"""
+        start_time = time.time()
+        while time.time() - start_time < max_timeout:
+            if self.page.element_is_exists(selector):
+                return self.page.get_element(selector)
+            self.wait(self.FIND_POLL_INTERVAL)
+'''
+        + "        \n"
+        + '''        self.logger.error(f"Element not found: {selector}")
+'''
+    )
+    new_find_element = r'''    @staticmethod
+    def _text_selector_parts(selector):
+        """识别常见文本 XPath，返回标签和文本，供 CSS 协议降级使用。"""
+        if not isinstance(selector, str):
+            return None
+        match = re.fullmatch(
+            r"""//([a-zA-Z][\w-]*)\[contains\(text\(\),\s*(['"])(.*?)\2\)\]""",
+            selector.strip(),
+        )
+        if not match:
+            return None
+        return match.group(1), match.group(3)
+
+    def _find_elements_without_xpath(self, selector):
+        """将常见的 XPath 定位转换为 CSS 查询，避免调用失效的 XPath 协议。"""
+        if not isinstance(selector, str):
+            return None
+
+        raw_selector = selector.strip()
+        index = None
+        indexed_match = re.fullmatch(r"\((.*)\)\[(\d+)\]", raw_selector)
+        if indexed_match:
+            raw_selector = indexed_match.group(1)
+            index = int(indexed_match.group(2)) - 1
+
+        segment = raw_selector.rsplit("//", 1)[-1]
+        segment_match = re.fullmatch(
+            r"([a-zA-Z*][\w-]*)\[(.*)\]",
+            segment,
+            re.DOTALL,
+        )
+        if not segment_match:
+            return None
+
+        tag = segment_match.group(1)
+        conditions = segment_match.group(2)
+        classes = re.findall(
+            r"contains\(concat\(' ',\s*@class,\s*' '\),\s*' ([^']+) '\)",
+            conditions,
+        )
+        classes.extend(
+            re.findall(
+                r"contains\(@class,\s*['\"]([^'\"]+)['\"]\)",
+                conditions,
+            )
+        )
+        text_match = re.search(
+            r"contains\(text\(\),\s*['\"](.*?)['\"]\)",
+            conditions,
+        )
+        src_match = re.search(
+            r"contains\(@src,\s*['\"](.*?)['\"]\)",
+            conditions,
+        )
+        if not classes and not text_match and not src_match:
+            return None
+
+        css_selector = "" if tag == "*" else tag
+        css_selector += "".join(f".{class_name}" for class_name in classes)
+        elements = self.page.get_elements(
+            css_selector or "*",
+            max_timeout=0,
+            index=-1,
+        )
+
+        if text_match:
+            expected_text = text_match.group(1)
+            exact_elements = [
+                element
+                for element in elements
+                if str(element.inner_text or "").strip() == expected_text
+            ]
+            elements = exact_elements or [
+                element
+                for element in elements
+                if expected_text in str(element.inner_text or "")
+            ]
+        if src_match:
+            expected_src = src_match.group(1)
+            elements = [
+                element
+                for element in elements
+                if expected_src in str(element.attribute("src")[0] or "")
+            ]
+        if index is not None:
+            return elements[index:index + 1]
+        return elements
+
+    def _custom_tab_index(self, selector):
+        """识别首页自定义 TabBar 的文本定位并返回对应索引。"""
+        parts = self._text_selector_parts(selector)
+        if not parts:
+            return None
+        try:
+            page_path = self.page.path.rstrip("/") or "/"
+        except Exception:
+            return None
+        if page_path != "/pages/index/index":
+            return None
+        return {
+            "抽卡": 0,
+            "抽赏": 1,
+            "图鉴": 2,
+            "我的": 3,
+        }.get(parts[1])
+
+    @staticmethod
+    def _unwrap_app_result(value):
+        """兼容不同 Minium 版本的 App.callFunction 返回结构。"""
+        for _ in range(5):
+            if isinstance(value, dict) and "result" in value:
+                value = value["result"]
+                continue
+            if hasattr(value, "result"):
+                value = value.result
+                continue
+            break
+        if isinstance(value, dict) and set(value) == {"value"}:
+            value = value["value"]
+        return value
+
+    def _try_custom_tab_click(self, selector):
+        """通过 App.callFunction 触发首页自定义 TabBar，避开失效的元素协议。"""
+        index = self._custom_tab_index(selector)
+        if index is None:
+            return False
+
+        app_function = """function(index) {
+            var pages = getCurrentPages();
+            if (!pages || !pages.length) {
+                return {ok: false, reason: "no current page"};
+            }
+            var page = pages[pages.length - 1];
+            if (!page || typeof page.selectComponent !== "function") {
+                return {ok: false, reason: "selectComponent unavailable"};
+            }
+            var component = page.selectComponent("my-tab-bar")
+                || page.selectComponent(".my-tab-bar");
+            if (!component || typeof component.triggerEvent !== "function") {
+                return {ok: false, reason: "custom TabBar not found"};
+            }
+            component.triggerEvent("change", index);
+            return {ok: true, index: index};
+        }"""
+        try:
+            response = self.app.evaluate(
+                app_function,
+                args=[index],
+                sync=True,
+                desc=f"trigger custom TabBar index {index}",
+            )
+            result = self._unwrap_app_result(response)
+            if isinstance(result, dict) and result.get("ok") is True:
+                self.log_step(f"点击自定义 TabBar: {selector}")
+                self.logger.info(
+                    f"Custom TabBar click -> {selector}, index={index}"
+                )
+                return True
+            self.logger.warning(
+                f"Custom TabBar fallback did not run for {selector}: {result}"
+            )
+        except Exception as exc:
+            self.logger.warning(
+                f"Custom TabBar fallback failed for {selector}: {exc}"
+            )
+        return False
+
+    def find_element(self, selector, max_timeout=10):
+        """轮询查找元素；优先避开新开发者工具不响应的 XPath 文本协议。"""
+        start_time = time.time()
+        while time.time() - start_time < max_timeout:
+            try:
+                compatible_elements = self._find_elements_without_xpath(selector)
+            except Exception as exc:
+                self.logger.debug(f"CSS locator failed: {exc}")
+                compatible_elements = None
+            if compatible_elements is not None:
+                if compatible_elements:
+                    return compatible_elements[0]
+            elif self.page.element_is_exists(selector):
+                return self.page.get_element(selector)
+            self.wait(self.FIND_POLL_INTERVAL)
+
+        self.logger.error(f"Element not found: {selector}")
+'''
+    base_page = base_page_path.read_text(encoding="utf-8")
+    if old_find_element not in base_page:
+        raise RuntimeError(
+            f"无法应用执行机元素定位兼容补丁，未找到预期内容: {base_page_path}"
+        )
+    base_page_path.write_text(
+        base_page.replace(old_find_element, new_find_element, 1),
+        encoding="utf-8",
+    )
+
+    replace_once(
+        base_page_path,
+        """        el = self.find_element(selector)
+        self.log_step(f"点击元素: {selector}")
+""",
+        r'''        if self._try_custom_tab_click(selector):
+            self.wait(after_wait, "after custom TabBar click")
+            if capture:
+                self.mini.capture(f"after_click_{int(time.time())}")
+            if check_errors:
+                self.wait(settle_wait, "request settle")
+                self.check_console_errors()
+                self.check_api_error(
+                    ignore_errors=self.ignore_api_errors,
+                    allowed_errors=self.allowed_api_errors,
+                )
+            return
+
+        el = self.find_element(selector)
+        self.log_step(f"点击元素: {selector}")
+''',
+    )
+
+    replace_once(
+        base_page_path,
+        """        xpath = "//view[contains(text(), '系统繁忙') or contains(text(), '网络错误')] | //*[contains(@class, 'toast-error')]"
+        if self.page.element_is_exists(xpath):
+            raise AssertionError("Detected Error Toast on page! Interface might be failed.")
+""",
+        """        for text in ("系统繁忙", "网络错误"):
+            selector = f"//view[contains(text(), '{text}')]"
+            if self._find_elements_without_xpath(selector):
+                raise AssertionError("Detected Error Toast on page! Interface might be failed.")
+        if self._find_elements_without_xpath("//*[contains(@class, 'toast-error')]"):
+            raise AssertionError("Detected Error Toast on page! Interface might be failed.")
+""",
+    )
+
+    replace_once(
+        base_page_path,
+        """        while time.time() < end_time:
+            if self.page.element_is_exists(selector):
+                return True
+            self.wait(0.5)
+        return False
+""",
+        """        while time.time() < end_time:
+            try:
+                compatible_elements = self._find_elements_without_xpath(selector)
+            except Exception as exc:
+                self.logger.debug(f"CSS locator failed: {exc}")
+                compatible_elements = None
+            if compatible_elements is not None:
+                if compatible_elements:
+                    return True
+            elif self.page.element_is_exists(selector):
+                return True
+            self.wait(0.5)
+        return False
+        """,
+    )
+
+    action_executor_path = package_dir / "framework" / "utils" / "action_executor.py"
+    replace_once(
+        action_executor_path,
+        "            is_exist = self.mini.page.element_is_exists(expect_value)\n",
+        "            is_exist = self.pages[\"front\"].element_exists(expect_value, timeout=3)\n",
+    )
+    replace_once(
+        action_executor_path,
+        "            element_text = self.mini.page.get_element(selector).inner_text\n",
+        "            element_text = self.pages[\"front\"].find_element(selector).inner_text\n",
+    )
+
+    run_path = package_dir / "run.py"
+    replace_once(
+        run_path,
+        "import shutil\nfrom pathlib import Path\n",
+        "import shutil\nfrom pathlib import Path\n\n"
+        "from tools.devtools_foreground import start_foreground_monitor\n",
+    )
+    replace_once(
+        run_path,
+        "import os\nimport time\n",
+        "import os\nimport time\nimport json\n",
+    )
+    replace_once(
+        run_path,
+        "    return path\n\ndef kill_port(port):\n",
+        """    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return path
+
+    changed = False
+    if "auto_capture" not in config:
+        config["auto_capture"] = False
+        changed = True
+    if "check_mp_foreground" not in config:
+        config["check_mp_foreground"] = True
+        changed = True
+    if changed:
+        path.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2) + "\\n",
+            encoding="utf-8",
+        )
+    return path
+
+def kill_port(port):
+""",
+    )
+    replace_once(
+        run_path,
+        "    original_argv = sys.argv\n    \n    try:\n",
+        "    original_argv = sys.argv\n    foreground_monitor = start_foreground_monitor()\n    \n    try:\n",
+    )
+    replace_once(
+        run_path,
+        "    finally:\n        sys.argv = original_argv\n        \n        # 3. 显式生成报告到 report 目录，避免覆盖 outputs 导致的异常\n",
+        "    finally:\n        foreground_monitor.stop()\n        sys.argv = original_argv\n        \n        # 3. 显式生成报告到 report 目录，避免覆盖 outputs 导致的异常\n",
+    )
+
+    config_path = package_dir / "config.example.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config.setdefault("auto_capture", False)
+    config.setdefault("check_mp_foreground", True)
+    config_path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def write_package_files(package_dir, version):
@@ -259,6 +763,12 @@ def write_package_files(package_dir, version):
                     "README.md",
                     "INSTALLATION_GUIDE.md",
                     "runtime_version.json",
+                    "tools/devtools_foreground.py",
+                ],
+                "compatibility": [
+                    "Keep WeChat DevTools in the foreground during Minium execution",
+                    "Disable Minium setup and teardown screenshots by default",
+                    "Use App.callFunction for the custom home TabBar text actions",
                 ],
             },
             ensure_ascii=False,
@@ -303,6 +813,7 @@ def build_package(source_root, output_dir, version):
 
     package_dir.mkdir()
     copy_runtime_files(source_root, package_dir)
+    patch_runtime_files(package_dir)
     write_package_files(package_dir, version)
     create_zip(package_dir, zip_path)
     checksum_path = write_checksum(zip_path)

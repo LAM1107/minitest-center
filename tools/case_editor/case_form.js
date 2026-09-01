@@ -106,6 +106,19 @@ function log(message) {
   outputEl.scrollTop = outputEl.scrollHeight;
 }
 
+// 保存/执行接口报错（如未选择执行机）用浮层提示，避免错误只停留在 Network 面板。
+function showToast(message, type = "error") {
+  const toast = document.createElement("div");
+  toast.className = `app-toast app-toast-${type}`;
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.classList.add("app-toast-show"), 10);
+  setTimeout(() => {
+    toast.classList.remove("app-toast-show");
+    setTimeout(() => toast.remove(), 300);
+  }, 4000);
+}
+
 function currentExecutionTargetId() {
   try {
     return (
@@ -947,20 +960,27 @@ async function saveCurrentCase() {
 
 async function runCase(caseId = "") {
   const agentId = currentExecutionTargetId();
-  const response = await api("/api/run_case", {
-    method: "POST",
-    body: JSON.stringify({
-      case_id: caseId,
-      agent_id: agentId,
-    }),
-  });
-  log(`执行任务已创建: ${response.job.job_id} ${caseId || "全部用例"}，${executionTargetText(agentId)}执行`);
-  return response.job;
+  try {
+    const response = await api("/api/run_case", {
+      method: "POST",
+      body: JSON.stringify({
+        case_id: caseId,
+        agent_id: agentId,
+      }),
+    });
+    log(`执行任务已创建: ${response.job.job_id} ${caseId || "全部用例"}，${executionTargetText(agentId)}执行`);
+    return response.job;
+  } catch (error) {
+    log(`执行任务创建失败: ${error.message}`);
+    showToast(`执行任务创建失败：${error.message}`, "error");
+    return null;
+  }
 }
 
 async function saveAndRun() {
   const saved = await saveCurrentCase();
-  await runCase(saved.case_id);
+  const job = await runCase(saved.case_id);
+  if (!job) return;
   window.location.href = appUrl(`/cases?view=runs&case_id=${encodeURIComponent(saved.case_id)}`);
 }
 

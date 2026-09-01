@@ -75,9 +75,21 @@ Windows 执行机需要具备：
 
 - Python 3.12。
 - 微信开发者工具。
-- 可正常打开的小程序项目。
+- 可正常打开的小程序项目，且**调试基础库钉在 3.7.12**（见 3.1，必读）。
 - 可以访问中心服务 URL 的网络。
 - 可以访问同一套 MySQL 的网络，或已经建立 SSH 隧道/VPN。
+
+### 3.1 调试基础库必须钉在 3.7.12（重要）
+
+基础库版本是执行机侧小程序项目的配置（`project.config.json` 和 `project.private.config.json` 的 `libVersion` 字段），中心机不涉及。注意：这两个文件在**小程序项目源码目录**（即执行机 `config.json` 里 `project_path` 指向的目录，例如 `C:\Users\Lenovo\Desktop\wx\ckj\mp-weixin`），不在执行机 ZIP 解压目录里。当前 minium 1.6.0（2024-10）与基础库 3.17.1（`latest`）不兼容：`Page.getElements` 页面级协议完全无响应，所有元素查询 60 秒超时，报 `receive from remote timeout` / `Element not found`，而 App 级调用（跳转、evaluate）正常。
+
+每台执行机部署小程序项目时，把两个配置文件里的 `libVersion` 都改掉：
+
+```json
+"libVersion": "3.7.12"
+```
+
+注意 `project.private.config.json` 会覆盖 `project.config.json`，两个都要改；不要写 `latest`。待 minium 发布兼容新版基础库的版本后再统一升级。
 
 中心机 `.env` 至少需要：
 
@@ -366,6 +378,53 @@ MINITEST_AGENT_SERVER=http://服务器IP:8765
 MINITEST_DB_HOST=服务器MySQL内网IP
 MINITEST_DB_USER=minitest_app
 ```
+
+### 截图里有元素，但仍提示找不到元素
+
+**首先按 3.1 把调试基础库钉到 3.7.12。** 基础库 3.17.1（`latest`）会让 minium 1.6.0
+的所有页面级元素查询（`Page.getElements` / `Page.getElementsByXpath`）60 秒超时，这是
+2026-08-31 排查确认的根因；钉回 3.7.12 后协议即恢复，无需改任何用例。
+
+如果日志中同时出现以下内容：
+
+```text
+Page.getElementsByXpath
+receive from remote timeout
+截图指令响应失败，可能因为开发者工具不在前台导致
+```
+
+这不是定位文本一定写错，而是微信开发者工具没有给 Minium 返回元素协议结果。请使用
+`2026.08.31.10` 或更高版本的执行机 ZIP，并按下面步骤更新。`2026.08.31.8`
+开始会把常见的文本、class、class+文本和 src 定位转换为 CSS 查询，避开当前微信开发者工具
+上无响应的 XPath 查询；`2026.08.31.10` 进一步兼容首页自定义 `my-tab-bar`，对
+`//view[contains(text(), '我的')]` 这类 TabBar 定位通过 Minium 的 App 脚本触发切换。
+
+1. 关闭旧的 `start_agent.cmd` 窗口。
+2. 将新版 ZIP 解压到新目录，不要覆盖旧目录。
+3. 将旧目录的 `.env` 和 `config.json` 复制到新目录。
+4. 确认 `config.json` 中存在：
+
+   ```json
+   "auto_capture": false,
+   "check_mp_foreground": true
+   ```
+
+5. 启动新目录的 `start_agent.cmd`，执行期间不要最小化、遮挡或切换微信开发者工具窗口。
+
+新版执行机会在 Minium 运行期间自动尝试激活微信开发者工具。若仍超时，请确认 Windows
+没有锁屏、远程桌面没有断开，并只保留一个该小程序项目的自动化实例。
+
+### 首页“我的”仍找不到
+
+如果错误是：
+
+```text
+Element not found: //view[contains(text(), '我的')], current page: /pages/index/index
+```
+
+请使用 `2026.08.31.10` 或更高版本。该版本识别首页的自定义 `my-tab-bar`，不再依赖
+`Page.getElementsByXpath` 查找组件内部文本。安装新包后保留原来的 `.env` 和 `config.json`，
+并重新启动新目录中的 `start_agent.cmd`。
 
 ### 找不到 Python 或 pip 安装失败
 

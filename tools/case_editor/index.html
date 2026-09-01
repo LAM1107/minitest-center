@@ -41,7 +41,10 @@
               <h2>正式用例</h2>
             </div>
             <div class="toolbar-actions">
-              <span id="runtimeExecutionTargetHint" class="execution-target-status"></span>
+              <label class="iteration-execution-target">
+                <span>执行位置</span>
+                <select id="runtimeExecutionTarget"></select>
+              </label>
               <a id="newRuntimeCaseBtn" class="btn btn-secondary btn-sm" href="/cases/new">新建</a>
               <button id="refreshRuntimeBtn" class="btn btn-secondary btn-sm" type="button">刷新</button>
               <button id="runAllBtn" class="btn btn-primary btn-sm" type="button">执行全部</button>

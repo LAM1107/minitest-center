@@ -83,7 +83,7 @@ const iterationPageSizeEl = document.querySelector("#iterationsPageSize");
 const iterationPrevBtn = document.querySelector("#iterationsPrevBtn");
 const iterationNextBtn = document.querySelector("#iterationsNextBtn");
 const iterationExecutionTargetEl = document.querySelector("#iterationExecutionTarget");
-const runtimeExecutionTargetHint = document.querySelector("#runtimeExecutionTargetHint");
+const runtimeExecutionTargetEl = document.querySelector("#runtimeExecutionTarget");
 const deleteIterationDialog = document.querySelector("#deleteIterationDialog");
 const deleteIterationNameEl = document.querySelector("#deleteIterationName");
 const deleteIterationCaseCountEl = document.querySelector("#deleteIterationCaseCount");
@@ -167,6 +167,20 @@ function log(message) {
   const now = new Date().toLocaleTimeString();
   outputEl.textContent += `[${now}] ${message}\n`;
   outputEl.scrollTop = outputEl.scrollHeight;
+}
+
+// 接口报错（如未选择执行机、中心机执行已禁用）用浮层提示，
+// 避免错误只出现在 Network 面板里、页面上毫无反馈。
+function showToast(message, type = "error") {
+  const toast = document.createElement("div");
+  toast.className = `app-toast app-toast-${type}`;
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.classList.add("app-toast-show"), 10);
+  setTimeout(() => {
+    toast.classList.remove("app-toast-show");
+    setTimeout(() => toast.remove(), 300);
+  }, 4000);
 }
 
 function setOutputExpanded(expanded) {
@@ -402,36 +416,25 @@ function iterationExecutionTargetText(agentId) {
   return agent?.agent_name || agentId;
 }
 
-function renderExecutionTargetHints() {
-  if (!runtimeExecutionTargetHint) return;
-  const agentId = currentExecutionTargetId();
-  runtimeExecutionTargetHint.textContent = `当前执行位置：${iterationExecutionTargetText(agentId)}`;
-  runtimeExecutionTargetHint.title = agentId
-    ? `当前任务会派发给执行机 ${agentId}`
-    : state.centerExecutionEnabled
-      ? "当前任务由中心机执行"
-      : "中心机执行已禁用，请到需求迭代页选择执行机";
+// 迭代页和正式用例页顶部的执行位置下拉共用同一套选项和状态。
+function executionTargetSelects() {
+  return [iterationExecutionTargetEl, runtimeExecutionTargetEl].filter(Boolean);
 }
 
-function fillIterationExecutionTargets() {
-  if (!iterationExecutionTargetEl) return;
-
-  const currentValue = currentExecutionTargetId() || iterationExecutionTargetEl.value;
-  iterationExecutionTargetEl.innerHTML = "";
-
+function buildExecutionTargetOptions() {
+  const fragment = document.createDocumentFragment();
   if (state.centerExecutionEnabled) {
     const centerOption = document.createElement("option");
     centerOption.value = "";
     centerOption.textContent = "中心机";
-    iterationExecutionTargetEl.appendChild(centerOption);
+    fragment.appendChild(centerOption);
   } else {
     const placeholderOption = document.createElement("option");
     placeholderOption.value = "";
     placeholderOption.textContent = "请选择执行机";
     placeholderOption.disabled = true;
-    iterationExecutionTargetEl.appendChild(placeholderOption);
+    fragment.appendChild(placeholderOption);
   }
-
   if (state.remoteAgentsEnabled) {
     for (const agent of state.executionAgents) {
       if (!agent.agent_id || Number(agent.enabled) === 0) continue;
@@ -440,15 +443,34 @@ function fillIterationExecutionTargets() {
       option.textContent = agent.agent_name
         ? `${agent.agent_name} (${agent.agent_id})`
         : agent.agent_id;
-      iterationExecutionTargetEl.appendChild(option);
+      fragment.appendChild(option);
     }
   }
+  return fragment;
+}
 
-  const exists = [...iterationExecutionTargetEl.options].some(
-    (option) => option.value === currentValue
+function fillIterationExecutionTargets() {
+  const selects = executionTargetSelects();
+  if (!selects.length) return;
+
+  const currentValue =
+    currentExecutionTargetId() || selects[0].value;
+  const optionsFragment = buildExecutionTargetOptions();
+  const availableValues = [...optionsFragment.children].map(
+    (option) => option.value
   );
-  const selectedAgentId = exists ? currentValue : "";
-  iterationExecutionTargetEl.value = selectedAgentId;
+
+  for (const select of selects) {
+    select.innerHTML = "";
+    select.appendChild(optionsFragment.cloneNode(true));
+  }
+
+  const selectedAgentId = availableValues.includes(currentValue)
+    ? currentValue
+    : "";
+  for (const select of selects) {
+    select.value = selectedAgentId;
+  }
   state.executionTargetId = selectedAgentId;
   if (selectedAgentId !== savedIterationExecutionTarget()) {
     saveIterationExecutionTarget(selectedAgentId);
@@ -1246,39 +1268,63 @@ async function loadRuns() {
   renderRuns();
 }
 
+// 提交前先校验执行位置：未选择执行机且中心机执行禁用时，
+// 后端会返回 400，这里提前拦截并用浮层提示，避免用户以为点击没反应。
+function ensureExecutionTargetSelected() {
+  if (currentExecutionTargetId()) return true;
+  if (state.centerExecutionEnabled) return true;
+  showToast("请先在顶部“执行位置”选择一台执行机", "error");
+  return false;
+}
+
 async function runCase(caseId = "") {
+  if (!ensureExecutionTargetSelected()) return;
   const agentId = currentExecutionTargetId();
-  const response = await api("/api/run_case", {
-    method: "POST",
-    body: JSON.stringify({
-      case_id: caseId,
-      agent_id: agentId,
-    }),
-  });
-  log(
-    `执行任务已创建: ${response.job.job_id} ${caseId || "全部用例"}，${iterationExecutionTargetText(agentId)}执行`
-  );
-  switchView("runs");
-  startPollingRuns();
+  try {
+    const response = await api("/api/run_case", {
+      method: "POST",
+      body: JSON.stringify({
+        case_id: caseId,
+        agent_id: agentId,
+      }),
+    });
+    log(
+      `执行任务已创建: ${response.job.job_id} ${caseId || "全部用例"}，${iterationExecutionTargetText(agentId)}执行`
+    );
+    switchView("runs");
+    startPollingRuns();
+  } catch (error) {
+    log(`执行任务创建失败: ${error.message}`);
+    showToast(`执行任务创建失败：${error.message}`, "error");
+  }
 }
 
 async function runIteration(iteration) {
   const iterationId = iteration?.iteration_id;
-  if (!iterationId) throw new Error("缺少 iteration_id");
+  if (!iterationId) {
+    showToast("缺少 iteration_id，无法执行", "error");
+    return;
+  }
+  if (!ensureExecutionTargetSelected()) return;
   const agentId = currentExecutionTargetId();
-  const response = await api("/api/run_iteration", {
-    method: "POST",
-    body: JSON.stringify({
-      iteration_id: iterationId,
-      agent_id: agentId,
-    }),
-  });
-  const name = iteration.iteration_name || iteration.iteration_code || iterationId;
-  log(
-    `迭代执行任务已创建: ${response.job.job_id} ${name}，${iterationExecutionTargetText(agentId)}执行`
-  );
-  switchView("runs");
-  startPollingRuns();
+  try {
+    const response = await api("/api/run_iteration", {
+      method: "POST",
+      body: JSON.stringify({
+        iteration_id: iterationId,
+        agent_id: agentId,
+      }),
+    });
+    const name = iteration.iteration_name || iteration.iteration_code || iterationId;
+    log(
+      `迭代执行任务已创建: ${response.job.job_id} ${name}，${iterationExecutionTargetText(agentId)}执行`
+    );
+    switchView("runs");
+    startPollingRuns();
+  } catch (error) {
+    log(`迭代执行任务创建失败: ${error.message}`);
+    showToast(`迭代执行任务创建失败：${error.message}`, "error");
+  }
 }
 
 function startPollingRuns() {
@@ -1714,11 +1760,18 @@ iterationPageSizeEl?.addEventListener("change", async () => {
   }
 });
 
-iterationExecutionTargetEl?.addEventListener("change", () => {
-  state.executionTargetId = iterationExecutionTargetEl.value || "";
+function onExecutionTargetChange(event) {
+  state.executionTargetId = event.target.value || "";
   saveIterationExecutionTarget(state.executionTargetId);
+  // 两个页面的下拉保持同步。
+  for (const select of executionTargetSelects()) {
+    if (select !== event.target) select.value = state.executionTargetId;
+  }
   renderExecutionTargetHints();
-});
+}
+
+iterationExecutionTargetEl?.addEventListener("change", onExecutionTargetChange);
+runtimeExecutionTargetEl?.addEventListener("change", onExecutionTargetChange);
 
 iterationPrevBtn?.addEventListener("click", async () => {
   if (state.iterationPagination.page <= 1) return;
