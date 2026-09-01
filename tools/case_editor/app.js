@@ -475,7 +475,6 @@ function fillIterationExecutionTargets() {
   if (selectedAgentId !== savedIterationExecutionTarget()) {
     saveIterationExecutionTarget(selectedAgentId);
   }
-  renderExecutionTargetHints();
 }
 
 async function loadExecutionAgents() {
@@ -489,7 +488,7 @@ async function loadExecutionAgents() {
     // 临时读取失败时不清掉浏览器中的远程选择，避免网络波动把任务意外改派到中心机。
     state.remoteAgentsEnabled = false;
     state.executionAgents = [];
-    renderExecutionTargetHints();
+    fillIterationExecutionTargets();
     log(`读取执行机列表失败，暂时保留当前执行位置: ${error.message}`);
     return;
   }
@@ -1767,7 +1766,6 @@ function onExecutionTargetChange(event) {
   for (const select of executionTargetSelects()) {
     if (select !== event.target) select.value = state.executionTargetId;
   }
-  renderExecutionTargetHints();
 }
 
 iterationExecutionTargetEl?.addEventListener("change", onExecutionTargetChange);
