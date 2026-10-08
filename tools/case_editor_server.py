@@ -6,6 +6,7 @@ StepExecutor 读取数据库步骤后完成。
 """
 
 import json
+import ipaddress
 import locale
 import os
 import subprocess
@@ -13,7 +14,7 @@ import sys
 import threading
 import time
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -25,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from framework.utils.mysql_case_repository import (
     MySqlCaseRepository,
+    cron_next_time,
     parse_inputs_text,
     public_action_page_options,
 )
@@ -34,9 +36,11 @@ REPORTS_DIR = PROJECT_ROOT / "reports"
 STATIC_DIR = PROJECT_ROOT / "tools" / "case_editor"
 RUN_JOBS = {}
 RUN_JOBS_LOCK = threading.Lock()
-SERVER_VERSION = "case-editor-20260723-center-runtime-v24"
+SERVER_VERSION = "case-editor-20260930-center-runtime-v25"
 # 反向代理将服务挂在 /minitest 等子路径时使用；空值表示根路径部署。
 URL_PREFIX = ""
+SCHEDULER_STOP = threading.Event()
+SCHEDULER_THREAD = None
 
 
 def normalize_url_prefix(value):
@@ -71,12 +75,15 @@ def strip_detected_prefix(path):
         "/iterations/",
         "/iterations/new",
         "/iterations/edit",
+        "/schedules",
+        "/schedules/new",
+        "/schedules/edit",
     }:
         return path
-    if path.startswith(("/api/", "/reports/", "/public-actions", "/iterations")):
+    if path.startswith(("/api/", "/reports/", "/public-actions", "/iterations", "/schedules")):
         return path
 
-    for marker in ("/api/", "/reports/", "/cases", "/public-actions", "/iterations"):
+    for marker in ("/api/", "/reports/", "/cases", "/public-actions", "/iterations", "/schedules"):
         index = path.find(marker)
         if index > 0:
             return path[index:]
@@ -629,6 +636,7 @@ def run_test_job(job_id, case_id="", iteration_id=None):
         case_repository().insert_report_record(RUN_JOBS[job_id])
     except Exception as exc:
         print(f"[WARN] Failed to write MySQL report record: {exc}")
+    update_schedule_after_job(RUN_JOBS[job_id])
 
 
 def start_test_run(
@@ -691,6 +699,119 @@ def start_test_run(
     return job
 
 
+def next_cron_time(expr, after=None):
+    """Compatibility wrapper returning a formatted next occurrence."""
+    return cron_next_time(expr, after=after).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def schedule_target(target):
+    """将定时任务目标解析为中心机、执行机 ID 或执行机 IP。"""
+    target = str(target or "center").strip()
+    if target.lower() in {"", "center", "local"}:
+        return "", ""
+    for agent in case_repository().list_agents():
+        if target == str(agent.get("agent_id") or "").strip():
+            return target, ""
+        if target == str(agent.get("agent_ip") or "").strip():
+            return "", target
+    try:
+        ipaddress.ip_address(target)
+        return "", target
+    except ValueError:
+        pass
+    return target, ""
+
+
+def update_schedule_after_job(job):
+    """把异步执行结果同步到定时任务，供页面展示最近一次结果。"""
+    schedule_id = job.get("schedule_id")
+    status = str(job.get("status") or "").strip().lower()
+    if schedule_id in (None, "") or status not in {"success", "failed"}:
+        return
+    try:
+        schedule = case_repository().get_schedule(schedule_id)
+        fail_count = 0 if status == "success" else int(schedule.get("fail_count") or 0) + 1
+        case_repository().update_schedule_runtime(
+            schedule_id, last_status=status, fail_count=fail_count
+        )
+    except Exception as exc:
+        print(f"[WARN] Failed to update schedule result: {exc}")
+
+
+def dispatch_due_schedule(schedule, now=None):
+    """处理一个到期任务；返回创建的 job，没有到期或被其他实例领取时返回 None。"""
+    now = now or datetime.now()
+    sid = schedule.get("id")
+    next_run_text = schedule.get("next_run_at")
+    if hasattr(next_run_text, "strftime"):
+        next_run = next_run_text
+    else:
+        next_run = datetime.strptime(next_run_text, "%Y-%m-%d %H:%M:%S") if next_run_text else None
+    if next_run is None:
+        next_run = cron_next_time(schedule.get("cron_expr"), after=now - timedelta(minutes=1))
+    if next_run > now:
+        return None
+
+    claimed = case_repository().claim_due_schedule(sid, now.strftime("%Y-%m-%d %H:%M:%S"))
+    if not claimed:
+        return None
+    if claimed.get("iteration_id") in (None, ""):
+        raise RuntimeError("旧定时任务尚未绑定迭代，请编辑任务并选择执行迭代")
+    following = cron_next_time(schedule.get("cron_expr"), after=now)
+    assigned_id, assigned_ip = schedule_target(schedule.get("run_target"))
+    if (assigned_id or assigned_ip) and not remote_agents_enabled():
+        raise RuntimeError("remote agents disabled")
+    if not (assigned_id or assigned_ip) and not center_execution_enabled():
+        raise RuntimeError("center execution disabled")
+    job = start_test_run(
+        iteration_id=schedule.get("iteration_id"),
+        assigned_agent_id=assigned_id,
+        assigned_agent_ip=assigned_ip,
+        trigger_type="schedule",
+        schedule_id=sid,
+    )
+    case_repository().mark_schedule_triggered(sid, job.get("job_id"), following, "queued")
+    return job
+
+
+def poll_schedules(now=None):
+    """轮询一次 mt_schedules，按 next_run_at 投递执行任务。"""
+    now = now or datetime.now()
+    schedules = case_repository().list_schedules(include_disabled=False)
+    for schedule in schedules:
+        sid = schedule.get("id")
+        if schedule.get("iteration_id") in (None, ""):
+            # 历史任务可能只有 case_id；迁移前跳过，禁止回退成“全部用例”。
+            print(f"[WARN] schedule {sid} skipped: iteration_id is required")
+            continue
+        try:
+            dispatch_due_schedule(schedule, now=now)
+        except Exception as exc:
+            print(f"[WARN] schedule {sid} dispatch failed: {exc}")
+            try:
+                failures = int(schedule.get("fail_count") or 0) + 1
+                case_repository().update_schedule_runtime(
+                    sid,
+                    last_run_at=now,
+                    next_run_at=cron_next_time(schedule.get("cron_expr"), after=now),
+                    last_status="failed",
+                    fail_count=failures,
+                )
+            except Exception:
+                pass
+
+
+def schedule_runner_loop():
+    """后台轮询 mt_schedules，按 next_run_at 投递执行任务。"""
+    while not SCHEDULER_STOP.is_set():
+        try:
+            poll_schedules()
+        except Exception as exc:
+            print(f"[WARN] schedule poll failed: {exc}")
+        if SCHEDULER_STOP.wait(15):
+            break
+
+
 def list_jobs():
     with RUN_JOBS_LOCK:
         jobs = list(RUN_JOBS.values())
@@ -716,15 +837,18 @@ class CaseEditorHandler(SimpleHTTPRequestHandler):
             "app.js",
             "case_form.js",
             "iteration_form.js",
+            "schedule_form.js",
             "style.css",
         }:
             return str(static_asset)
-        if normalized_path in {"/", "/cases", "/cases/", "/iterations", "/iterations/"}:
+        if normalized_path in {"/", "/cases", "/cases/", "/iterations", "/iterations/", "/schedules", "/schedules/"}:
             return str(STATIC_DIR / "index.html")
         if normalized_path in {"/cases/new", "/cases/edit"}:
             return str(STATIC_DIR / "case_form.html")
         if normalized_path in {"/iterations/new", "/iterations/edit"}:
             return str(STATIC_DIR / "iteration_form.html")
+        if normalized_path in {"/schedules/new", "/schedules/edit"}:
+            return str(STATIC_DIR / "schedule_form.html")
         if normalized_path in {
             "/public-actions",
             "/public-actions/",
@@ -751,6 +875,11 @@ class CaseEditorHandler(SimpleHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", cors_origin)
             self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # 编辑器脚本会随服务版本更新；禁止浏览器复用旧 JS，避免页面模板
+        # 已更新但保存逻辑仍是旧版本，导致新字段未提交。
+        static_path = urlparse(self.path).path.split("?", 1)[0]
+        if static_path.endswith((".html", ".js", ".css")):
+            self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
     def send_json(self, payload, status=200):
@@ -758,6 +887,7 @@ class CaseEditorHandler(SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
 
@@ -830,8 +960,19 @@ class CaseEditorHandler(SimpleHTTPRequestHandler):
                 return self.send_json({"job": case_repository().get_run_record_detail(job_id)})
             except Exception as exc:
                 return self.send_json({"ok": False, "error": str(exc)}, 500)
+        if normalized_path in {"/api/schedule_detail", "/api/schedule_get"}:
+            try:
+                schedule_id = query.get("id", query.get("schedule_id", [""]))[0]
+                return self.send_json({"schedule": case_repository().get_schedule(schedule_id)})
+            except Exception as exc:
+                return self.send_json({"ok": False, "error": str(exc)}, 500)
         if normalized_path == "/api/run_jobs":
             return self.send_json({"jobs": list_run_records(), "reports": list_reports()})
+        if normalized_path in {"/api/schedules", "/api/schedule_list"}:
+            try:
+                return self.send_json({"schedules": case_repository().list_schedules()})
+            except Exception as exc:
+                return self.send_json({"ok": False, "error": str(exc)}, 500)
         if normalized_path == "/api/agents":
             try:
                 return self.send_json(
@@ -962,12 +1103,14 @@ class CaseEditorHandler(SimpleHTTPRequestHandler):
                     "assert_types": ["element_exists", "exist_page"],
                 }
             )
-        if normalized_path in {"/", "/cases", "/cases/", "/iterations", "/iterations/"}:
+        if normalized_path in {"/", "/cases", "/cases/", "/iterations", "/iterations/", "/schedules", "/schedules/"}:
             return self.send_editor_page("index.html")
         if normalized_path in {"/cases/new", "/cases/edit"}:
             return self.send_editor_page("case_form.html")
         if normalized_path in {"/iterations/new", "/iterations/edit"}:
             return self.send_editor_page("iteration_form.html")
+        if normalized_path in {"/schedules/new", "/schedules/edit"}:
+            return self.send_editor_page("schedule_form.html")
         if normalized_path in {
             "/public-actions",
             "/public-actions/",
@@ -1009,6 +1152,43 @@ class CaseEditorHandler(SimpleHTTPRequestHandler):
             if normalized_path == "/api/iterations":
                 result = case_repository().upsert_iteration(payload)
                 return self.send_json({"ok": True, "result": result})
+            if normalized_path in {"/api/schedules", "/api/schedule_upsert", "/api/schedule_create", "/api/schedule_edit"}:
+                # Validate cron and initialize the first execution time on create/edit.
+                cron_expr = str(payload.get("cron_expr") or payload.get("cron") or "").strip()
+                first_run = cron_next_time(cron_expr)
+                payload["next_run_at"] = first_run.strftime("%Y-%m-%d %H:%M:%S") if payload.get("enabled", 1) else None
+                result = case_repository().upsert_schedule(payload)
+                return self.send_json({"ok": True, "schedule": result})
+            if normalized_path == "/api/schedule_delete":
+                result = case_repository().delete_schedule(payload.get("id") or payload.get("schedule_id"))
+                return self.send_json({"ok": True, "result": result})
+            if normalized_path in {"/api/schedule_enabled", "/api/schedule_toggle"}:
+                sid = payload.get("id") or payload.get("schedule_id")
+                if normalized_path.endswith("toggle") and "enabled" not in payload:
+                    current = case_repository().get_schedule(sid)
+                    payload["enabled"] = not bool(current.get("enabled"))
+                result = case_repository().set_schedule_enabled(sid, payload.get("enabled"))
+                return self.send_json({"ok": True, "schedule": result})
+            if normalized_path == "/api/schedule_run":
+                schedule = case_repository().get_schedule(payload.get("id") or payload.get("schedule_id"))
+                if schedule.get("iteration_id") in (None, ""):
+                    return self.send_json({"ok": False, "error": "旧定时任务尚未绑定迭代，请编辑任务并选择执行迭代"}, 400)
+                assigned_id, assigned_ip = schedule_target(schedule.get("run_target"))
+                if (assigned_id or assigned_ip) and not remote_agents_enabled():
+                    return self.send_json({"ok": False, "error": "远程执行机未启用"}, 400)
+                if not (assigned_id or assigned_ip) and not center_execution_enabled():
+                    return self.send_json({"ok": False, "error": "中心机执行已禁用"}, 400)
+                job = start_test_run(
+                    iteration_id=schedule.get("iteration_id"),
+                    assigned_agent_id=assigned_id,
+                    assigned_agent_ip=assigned_ip,
+                    trigger_type="schedule",
+                    schedule_id=schedule["id"],
+                )
+                next_at = cron_next_time(schedule["cron_expr"])
+                case_repository().update_schedule_runtime(schedule["id"], last_run_at=datetime.now())
+                case_repository().mark_schedule_triggered(schedule["id"], job.get("job_id"), next_at, "queued")
+                return self.send_json({"ok": True, "job": job})
             if normalized_path == "/api/pipeline":
                 case_id = str(payload.get("case_id", "")).strip()
                 if not case_id:
@@ -1121,6 +1301,7 @@ class CaseEditorHandler(SimpleHTTPRequestHandler):
                 case_repository().insert_run_record(job)
                 if str(job.get("status") or "").strip() in {"success", "failed"}:
                     case_repository().insert_report_record(job)
+                    update_schedule_after_job(job)
                     if agent_id:
                         case_repository().finish_agent_job(agent_id, job_id, status="online")
                 with RUN_JOBS_LOCK:
@@ -1141,6 +1322,11 @@ class CaseEditorHandler(SimpleHTTPRequestHandler):
         payload = json.loads(raw or "{}")
 
         try:
+            if normalized_path in {"/api/schedules", "/api/schedule_upsert", "/api/schedule_edit", "/api/schedule_update"}:
+                cron_expr = str(payload.get("cron_expr") or payload.get("cron") or "").strip()
+                payload["next_run_at"] = next_cron_time(cron_expr) if payload.get("enabled", 1) else None
+                result = case_repository().upsert_schedule(payload)
+                return self.send_json({"ok": True, "schedule": result})
             if normalized_path == "/api/public_action_edit":
                 public_action_id = str(
                     payload.get("public_action_id") or payload.get("id") or ""
@@ -1153,6 +1339,16 @@ class CaseEditorHandler(SimpleHTTPRequestHandler):
         except Exception as exc:
             return self.send_json({"ok": False, "error": str(exc)}, 500)
 
+        return self.send_json({"ok": False, "error": "Not found"}, 404)
+
+    def do_DELETE(self):
+        normalized_path = request_path(urlparse(self.path).path)
+        if normalized_path.startswith("/api/schedules/"):
+            sid = normalized_path.rsplit("/", 1)[-1]
+            try:
+                return self.send_json({"ok": True, "result": case_repository().delete_schedule(sid)})
+            except Exception as exc:
+                return self.send_json({"ok": False, "error": str(exc)}, 500)
         return self.send_json({"ok": False, "error": "Not found"}, 404)
 
 
@@ -1180,9 +1376,16 @@ def main():
     if URL_PREFIX:
         print(f"URL prefix: {URL_PREFIX}")
     print("Press Ctrl+C to stop.")
+    global SCHEDULER_THREAD
+    SCHEDULER_STOP.clear()
+    SCHEDULER_THREAD = threading.Thread(target=schedule_runner_loop, name="minitest-scheduler", daemon=True)
+    SCHEDULER_THREAD.start()
     if not args.no_open:
         webbrowser.open(url)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        SCHEDULER_STOP.set()
 
 
 if __name__ == "__main__":

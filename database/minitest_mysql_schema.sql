@@ -169,7 +169,8 @@ CREATE TABLE IF NOT EXISTS mt_case_steps (
 CREATE TABLE IF NOT EXISTS mt_schedules (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键 ID',
   schedule_name VARCHAR(160) NOT NULL COMMENT '定时任务名称',
-  case_id VARCHAR(80) NOT NULL DEFAULT '' COMMENT '执行的用例编号，空值表示执行全部用例',
+  iteration_id BIGINT UNSIGNED NULL COMMENT '执行的迭代 ID，关联 mt_iteration.id',
+  case_id VARCHAR(80) NOT NULL DEFAULT '' COMMENT '历史兼容字段，新任务使用 iteration_id',
   cron_expr VARCHAR(120) NOT NULL COMMENT 'cron 表达式，例如 0 9 * * *',
   run_target VARCHAR(80) NOT NULL DEFAULT 'center' COMMENT '执行目标，当前默认 center',
   enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用：1=启用，0=禁用',
@@ -183,8 +184,14 @@ CREATE TABLE IF NOT EXISTS mt_schedules (
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '最后更新时间',
   PRIMARY KEY (id),
   KEY idx_mt_schedules_enabled_next (enabled, next_run_at),
+  KEY idx_mt_schedules_iteration_id (iteration_id),
   KEY idx_mt_schedules_case_id (case_id),
-  KEY idx_mt_schedules_last_job (last_job_id)
+  KEY idx_mt_schedules_last_job (last_job_id),
+  CONSTRAINT fk_mt_schedules_iteration_id
+    FOREIGN KEY (iteration_id)
+    REFERENCES mt_iteration (id)
+    ON DELETE SET NULL
+    ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='定时任务表';
 
 CREATE TABLE IF NOT EXISTS mt_run_records (

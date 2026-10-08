@@ -14,7 +14,7 @@ const state = {
   centerExecutionEnabled: true,
 };
 
-const EXPECTED_SERVER_VERSION = "case-editor-20260723-center-runtime-v24";
+const EXPECTED_SERVER_VERSION = "case-editor-20260930-center-runtime-v25";
 const EXECUTION_TARGET_STORAGE_KEY = "minitest.execution_target";
 const LEGACY_EXECUTION_TARGET_STORAGE_KEY = "minitest.iteration_execution_target";
 const ROUTE_MARKERS = ["/cases", "/public-actions", "/api", "/reports"];
@@ -204,6 +204,29 @@ function fillConditionTypeSelect(select, selected = "always") {
   select.innerHTML = CONDITION_TYPES
     .map((item) => `<option value="${item.value}" ${item.value === selected ? "selected" : ""}>${item.label}</option>`)
     .join("");
+}
+
+function parseConditionOptions(value) {
+  const raw = String(value || "").trim();
+  const separator = raw.includes(";") ? ";" : ",";
+  const visibleOptions = [];
+  let stopOnConditionFail = false;
+  for (const option of raw.split(separator)) {
+    const match = option.match(/^\s*stop_on_condition_fail\s*=\s*(.*?)\s*$/i);
+    if (!match) {
+      if (option.trim()) visibleOptions.push(option.trim());
+      continue;
+    }
+    stopOnConditionFail = ["true", "1", "yes", "y"].includes(match[1].toLowerCase());
+  }
+  return { options: visibleOptions.join(separator), separator, stopOnConditionFail };
+}
+
+function serializeConditionOptions(value, stopOnConditionFail) {
+  const parsed = parseConditionOptions(value);
+  const options = parsed.options ? parsed.options.split(parsed.separator) : [];
+  if (stopOnConditionFail) options.push("stop_on_condition_fail=true");
+  return options.map((option) => option.trim()).filter(Boolean).join(parsed.separator);
 }
 
 function fillApiErrorModeSelect(select, selected = "normal") {
@@ -776,7 +799,9 @@ function createStep(step = {}) {
   node.querySelector('[name="locator_options"]').value = step.locator_options || "";
   node.querySelector('[name="step_value"]').value = step.step_value || "";
   node.querySelector('[name="condition_locator_value"]').value = step.condition_locator_value || "";
-  node.querySelector('[name="condition_options"]').value = step.condition_options || "";
+  const conditionOptions = parseConditionOptions(step.condition_options);
+  node.querySelector('[name="condition_options"]').value = conditionOptions.options;
+  node.querySelector('[name="stop_on_condition_fail"]').checked = conditionOptions.stopOnConditionFail;
   node.querySelector('[name="备注"]').value = step["备注"] || "";
   node.querySelector('[name="locator_method"]').addEventListener("change", () => {
     node.querySelector('[name="public_action"]').value = "";
@@ -839,7 +864,11 @@ function getVisibleStepData() {
     condition_type: node.querySelector('[name="condition_type"]').value,
     condition_locator_method: node.querySelector('[name="condition_locator_method"]').value,
     condition_locator_value: node.querySelector('[name="condition_locator_value"]').value.trim(),
-    condition_options: node.querySelector('[name="condition_options"]').value.trim(),
+    condition_options: serializeConditionOptions(
+      node.querySelector('[name="condition_options"]').value,
+      node.querySelector('[name="stop_on_condition_fail"]').checked
+    ),
+    stop_on_condition_fail: node.querySelector('[name="stop_on_condition_fail"]').checked,
     "备注": node.querySelector('[name="备注"]').value.trim(),
   }));
 }

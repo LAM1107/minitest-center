@@ -7,7 +7,7 @@
 import json
 import os
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -16,6 +16,78 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRAMEWORK_INPUT_KEYS = {"ignore_error", "allowed_errors"}
 API_ERROR_CHECK_MODES = {"normal", "allow_list"}
 ITERATION_STATUSES = {"planning", "active", "completed", "archived"}
+
+
+def _cron_values(field, minimum, maximum, sunday_alias=False):
+    """Parse one cron field (supports *, ranges, lists and step values)."""
+    field = str(field or "").strip()
+    if not field:
+        raise ValueError("cron field cannot be empty")
+    values = set()
+    for token in field.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "/" in token:
+            base, step_text = token.split("/", 1)
+            try:
+                step = int(step_text)
+            except ValueError as exc:
+                raise ValueError(f"invalid cron step: {token}") from exc
+            if step <= 0:
+                raise ValueError(f"cron step must be positive: {token}")
+        else:
+            base, step = token, 1
+        if base in ("", "*"):
+            start, end = minimum, maximum
+        elif "-" in base:
+            left, right = base.split("-", 1)
+            try:
+                start, end = int(left), int(right)
+            except ValueError as exc:
+                raise ValueError(f"invalid cron range: {token}") from exc
+        else:
+            try:
+                start = end = int(base)
+            except ValueError as exc:
+                raise ValueError(f"invalid cron value: {token}") from exc
+        if sunday_alias and start == 7:
+            start = end = 0
+        if start < minimum or end > maximum or start > end:
+            raise ValueError(f"cron value out of range: {token}")
+        values.update(range(start, end + 1, step))
+    if not values:
+        raise ValueError(f"invalid cron field: {field}")
+    return values
+
+
+def cron_next_time(cron_expr, after=None, max_minutes=366 * 24 * 60):
+    """Return the next datetime matching a standard five-field cron expression."""
+    parts = str(cron_expr or "").split()
+    if len(parts) != 5:
+        raise ValueError("cron_expr must contain five fields: minute hour day month weekday")
+    minute_values = _cron_values(parts[0], 0, 59)
+    hour_values = _cron_values(parts[1], 0, 23)
+    day_values = _cron_values(parts[2], 1, 31)
+    month_values = _cron_values(parts[3], 1, 12)
+    weekday_values = _cron_values(parts[4], 0, 7, sunday_alias=True)
+    candidate = after or datetime.now()
+    candidate = candidate.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    day_wildcard = parts[2] in ("*", "*/1")
+    weekday_wildcard = parts[4] in ("*", "*/1")
+    for _ in range(max_minutes):
+        if (
+            candidate.minute in minute_values
+            and candidate.hour in hour_values
+            and candidate.month in month_values
+        ):
+            day_match = candidate.day in day_values
+            weekday_match = candidate.weekday() in {((v - 1) % 7) for v in weekday_values}
+            # Cron uses OR semantics when both day-of-month and day-of-week are restricted.
+            if (day_match or weekday_match) if (not day_wildcard and not weekday_wildcard) else (day_match and weekday_match):
+                return candidate
+        candidate += timedelta(minutes=1)
+    raise ValueError("cron expression has no occurrence within one year")
 
 
 def load_project_env():
@@ -48,6 +120,25 @@ def is_mysql_storage_enabled():
 
 def _clean(value):
     return "" if value is None else str(value).strip()
+
+
+def _condition_options(step):
+    """Normalize the optional stop flag while retaining legacy options."""
+    raw = _clean(step.get("condition_options"))
+    explicit = step.get("stop_on_condition_fail")
+    if explicit is None:
+        return raw
+
+    separator = ";" if ";" in raw else ","
+    options = []
+    for item in raw.split(separator):
+        item = item.strip()
+        if not item or item.lower().startswith("stop_on_condition_fail="):
+            continue
+        options.append(item)
+    if _enabled_flag(explicit, default=0):
+        options.append("stop_on_condition_fail=true")
+    return separator.join(options)
 
 
 def public_action_page_options():
@@ -1122,7 +1213,7 @@ class MySqlCaseRepository:
                         _clean(step.get("condition_type") or "always"),
                         _clean(step.get("condition_locator_method")),
                         _clean(step.get("condition_locator_value")),
-                        _clean(step.get("condition_options")),
+                        _condition_options(step),
                         int(child_action_id) if child_action_id else None,
                         _clean(step.get("remark") or step.get("备注")),
                     ),
@@ -1492,7 +1583,7 @@ class MySqlCaseRepository:
                         _clean(step.get("condition_type") or "always"),
                         _clean(step.get("condition_locator_method")),
                         _clean(step.get("condition_locator_value")),
-                        _clean(step.get("condition_options")),
+                        _condition_options(step),
                         _clean(step.get("remark") or step.get("备注")),
                     ),
                 )
@@ -1813,6 +1904,215 @@ class MySqlCaseRepository:
             "job_id": _clean(job_id),
             "status": status,
         }
+
+    # ---- 定时任务 ---------------------------------------------------------
+    def _schedule_row(self, row):
+        if not row:
+            return None
+        return {
+            "id": row.get("id"),
+            "schedule_name": _clean(row.get("schedule_name")),
+            "iteration_id": row.get("iteration_id"),
+            "iteration_code": _clean(row.get("iteration_code")),
+            "iteration_name": _clean(row.get("iteration_name")),
+            "case_id": _clean(row.get("case_id")),
+            "legacy_case_id": _clean(row.get("case_id")) if not row.get("iteration_id") else "",
+            "cron_expr": _clean(row.get("cron_expr")),
+            "run_target": _clean(row.get("run_target")) or "center",
+            "enabled": _int_value(row.get("enabled"), 1),
+            "last_run_at": _datetime_text(row.get("last_run_at")),
+            "next_run_at": _datetime_text(row.get("next_run_at")),
+            "last_job_id": _clean(row.get("last_job_id")),
+            "last_status": _clean(row.get("last_status")),
+            "fail_count": _int_value(row.get("fail_count")),
+            "remark": _clean(row.get("remark")),
+            "created_at": _datetime_text(row.get("created_at")),
+            "updated_at": _datetime_text(row.get("updated_at")),
+        }
+
+    def list_schedules(self, include_disabled=True):
+        sql = """
+            SELECT s.*, i.iteration_code, i.iteration_name
+            FROM mt_schedules s
+            LEFT JOIN mt_iteration i ON i.id = s.iteration_id
+        """
+        params = ()
+        if not include_disabled:
+            sql += " WHERE s.enabled = 1"
+        sql += " ORDER BY s.enabled DESC, COALESCE(s.next_run_at, s.created_at) ASC, s.id ASC"
+        with self.connect() as (_, cursor):
+            cursor.execute(sql, params)
+            rows = list(cursor.fetchall())
+        return [self._schedule_row(row) for row in rows]
+
+    def get_schedule(self, schedule_id):
+        schedule_id = _optional_id(schedule_id, "schedule_id")
+        with self.connect() as (_, cursor):
+            cursor.execute(
+                """SELECT s.*, i.iteration_code, i.iteration_name
+                   FROM mt_schedules s
+                   LEFT JOIN mt_iteration i ON i.id = s.iteration_id
+                   WHERE s.id = %s""",
+                (schedule_id,),
+            )
+            row = cursor.fetchone()
+        if not row:
+            raise ValueError(f"Schedule not found: {schedule_id}")
+        return self._schedule_row(row)
+
+    def upsert_schedule(self, data):
+        data = data or {}
+        schedule_id = _optional_id(data.get("id") or data.get("schedule_id"), "schedule_id")
+        name = _clean(data.get("schedule_name") or data.get("name"))
+        cron_expr = _clean(data.get("cron_expr") or data.get("cron"))
+        if not name:
+            raise ValueError("schedule_name is required")
+        if len(name) > 160:
+            raise ValueError("schedule_name exceeds 160 characters")
+        # Validate expression and calculate first occurrence before touching DB.
+        next_run = cron_next_time(cron_expr) if _enabled_flag(data.get("enabled"), default=1) else None
+        iteration_id = _optional_id(data.get("iteration_id"), "iteration_id")
+        if not iteration_id:
+            raise ValueError("iteration_id is required; 定时任务必须绑定一个迭代")
+        case_id = ""
+        run_target = _clean(data.get("run_target")) or "center"
+        enabled = _enabled_flag(data.get("enabled"), default=1)
+        remark = _clean(data.get("remark"))
+        with self.connect() as (_, cursor):
+            cursor.execute(
+                """SELECT id FROM mt_iteration
+                   WHERE id = %s AND deleted_at IS NULL""",
+                (iteration_id,),
+            )
+            if not cursor.fetchone():
+                raise ValueError(f"iteration not found or deleted: {iteration_id}")
+            cursor.execute(
+                """SELECT COUNT(*) AS total FROM mt_cases
+                   WHERE iteration_id = %s AND enabled = 1""",
+                (iteration_id,),
+            )
+            if int((cursor.fetchone() or {}).get("total") or 0) == 0:
+                raise ValueError("该迭代没有已启用的正式用例，无法创建定时任务")
+            if schedule_id:
+                cursor.execute(
+                    """UPDATE mt_schedules SET schedule_name=%s, iteration_id=%s, case_id=%s,
+                       cron_expr=%s, run_target=%s, enabled=%s, next_run_at=%s, remark=%s WHERE id=%s""",
+                    (name, iteration_id, case_id, cron_expr, run_target, enabled, next_run, remark, schedule_id),
+                )
+            else:
+                cursor.execute(
+                    """INSERT INTO mt_schedules
+                       (schedule_name, iteration_id, case_id, cron_expr, run_target, enabled, next_run_at, remark)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (name, iteration_id, case_id, cron_expr, run_target, enabled, next_run, remark),
+                )
+                schedule_id = cursor.lastrowid
+            cursor.execute(
+                """SELECT s.*, i.iteration_code, i.iteration_name
+                   FROM mt_schedules s
+                   LEFT JOIN mt_iteration i ON i.id = s.iteration_id
+                   WHERE s.id = %s""",
+                (schedule_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"Schedule not found: {schedule_id}")
+        return self._schedule_row(row)
+
+    def set_schedule_enabled(self, schedule_id, enabled):
+        schedule_id = _optional_id(schedule_id, "schedule_id")
+        enabled = _enabled_flag(enabled, default=1)
+        with self.connect() as (_, cursor):
+            cursor.execute("SELECT cron_expr, next_run_at FROM mt_schedules WHERE id=%s", (schedule_id,))
+            current = cursor.fetchone()
+            if not current:
+                raise ValueError(f"Schedule not found: {schedule_id}")
+            next_run = current.get("next_run_at")
+            if enabled and not next_run:
+                next_run = cron_next_time(current.get("cron_expr"))
+            if not enabled:
+                next_run = None
+            cursor.execute("UPDATE mt_schedules SET enabled=%s, next_run_at=%s WHERE id=%s", (enabled, next_run, schedule_id))
+            cursor.execute("SELECT * FROM mt_schedules WHERE id=%s", (schedule_id,))
+            row = cursor.fetchone()
+        return self._schedule_row(row)
+
+    def delete_schedule(self, schedule_id):
+        schedule_id = _optional_id(schedule_id, "schedule_id")
+        with self.connect() as (_, cursor):
+            cursor.execute("DELETE FROM mt_schedules WHERE id=%s", (schedule_id,))
+            if cursor.rowcount == 0:
+                raise ValueError(f"Schedule not found: {schedule_id}")
+        return {"id": schedule_id, "deleted": True}
+
+    def update_schedule_runtime(self, schedule_id, *, last_run_at=None, next_run_at=None,
+                                last_job_id=None, last_status=None, fail_count=None):
+        schedule_id = _optional_id(schedule_id, "schedule_id")
+        fields, params = [], []
+        for column, value in (("last_run_at", last_run_at), ("next_run_at", next_run_at),
+                              ("last_job_id", last_job_id), ("last_status", last_status),
+                              ("fail_count", fail_count)):
+            if value is not None:
+                fields.append(f"{column}=%s")
+                params.append(value)
+        if not fields:
+            return self.get_schedule(schedule_id)
+        params.append(schedule_id)
+        with self.connect() as (_, cursor):
+            cursor.execute(f"UPDATE mt_schedules SET {', '.join(fields)} WHERE id=%s", params)
+            cursor.execute("SELECT * FROM mt_schedules WHERE id=%s", (schedule_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"Schedule not found: {schedule_id}")
+        return self._schedule_row(row)
+
+    def claim_due_schedule(self, schedule_id, claimed_at):
+        """Atomically claim a due schedule to prevent duplicate dispatchers."""
+        schedule_id = _optional_id(schedule_id, "schedule_id")
+        with self.connect() as (_, cursor):
+            cursor.execute(
+                """UPDATE mt_schedules SET last_run_at=%s, last_status='dispatching'
+                   WHERE id=%s AND enabled=1
+                     AND (next_run_at IS NULL OR next_run_at <= %s)""",
+                (claimed_at, schedule_id, claimed_at),
+            )
+            if cursor.rowcount == 0:
+                return None
+            cursor.execute("SELECT * FROM mt_schedules WHERE id=%s", (schedule_id,))
+            return self._schedule_row(cursor.fetchone())
+
+    def mark_schedule_triggered(self, schedule_id, job_id, next_run_at, status="queued"):
+        schedule_id = _optional_id(schedule_id, "schedule_id")
+        with self.connect() as (_, cursor):
+            cursor.execute(
+                """UPDATE mt_schedules
+                   SET next_run_at=%s,
+                       last_job_id=%s,
+                       last_status=CASE
+                           WHEN last_status IN ('', 'dispatching', 'queued') THEN %s
+                           ELSE last_status
+                       END,
+                       fail_count=CASE
+                           WHEN last_status IN ('', 'dispatching', 'queued') THEN 0
+                           ELSE fail_count
+                       END
+                   WHERE id=%s""",
+                (next_run_at, _clean(job_id), _clean(status or "queued"), schedule_id),
+            )
+            cursor.execute("SELECT * FROM mt_schedules WHERE id=%s", (schedule_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"Schedule not found: {schedule_id}")
+        return self._schedule_row(row)
+
+    def set_schedule_error(self, schedule_id, error):
+        schedule = self.get_schedule(schedule_id)
+        failures = int(schedule.get("fail_count") or 0) + 1
+        return self.update_schedule_runtime(
+            schedule_id,
+            last_status=f"failed: {_clean(error)[:200]}",
+            fail_count=failures,
+        )
 
     def insert_run_record(self, job):
         summary = job.get("result_summary")

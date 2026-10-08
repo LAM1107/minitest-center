@@ -431,48 +431,65 @@ def patch_runtime_files(package_dir):
             raw_selector = indexed_match.group(1)
             index = int(indexed_match.group(2)) - 1
 
-        segment = raw_selector.rsplit("//", 1)[-1]
-        segment_match = re.fullmatch(
-            r"([a-zA-Z*][\w-]*)\[(.*)\]",
-            segment,
-            re.DOTALL,
-        )
-        if not segment_match:
-            return None
+        # Keep every descendant segment.  The old fallback only queried the
+        # last segment, so a selector such as
+        # ``parent//view[contains(@class, 'mini-checkbox')]`` became a global
+        # query and could pick a hidden/disabled checkbox from another modal.
+        segments = [part for part in raw_selector.split("//") if part]
+        parsed_segments = []
+        has_supported_condition = False
+        text_matches = []
+        src_matches = []
+        for segment in segments:
+            segment_match = re.fullmatch(
+                r"([a-zA-Z*][\w-]*)\[(.*)\]",
+                segment,
+                re.DOTALL,
+            )
+            if not segment_match:
+                return None
 
-        tag = segment_match.group(1)
-        conditions = segment_match.group(2)
-        classes = re.findall(
-            r"contains\(concat\(' ',\s*@class,\s*' '\),\s*' ([^']+) '\)",
-            conditions,
-        )
-        classes.extend(
-            re.findall(
-                r"contains\(@class,\s*['\"]([^'\"]+)['\"]\)",
+            tag = segment_match.group(1)
+            conditions = segment_match.group(2)
+            classes = re.findall(
+                r"contains\(concat\(' ',\s*@class,\s*' '\),\s*' ([^']+) '\)",
                 conditions,
             )
-        )
-        text_match = re.search(
-            r"contains\(text\(\),\s*['\"](.*?)['\"]\)",
-            conditions,
-        )
-        src_match = re.search(
-            r"contains\(@src,\s*['\"](.*?)['\"]\)",
-            conditions,
-        )
-        if not classes and not text_match and not src_match:
+            classes.extend(
+                re.findall(
+                    r"contains\(@class,\s*['\"]([^'\"]+)['\"]\)",
+                    conditions,
+                )
+            )
+            text_match = re.search(
+                r"contains\(text\(\),\s*['\"](.*?)['\"]\)",
+                conditions,
+            )
+            src_match = re.search(
+                r"contains\(@src,\s*['\"](.*?)['\"]\)",
+                conditions,
+            )
+            if classes or text_match or src_match:
+                has_supported_condition = True
+            if text_match:
+                text_matches.append(text_match.group(1))
+            if src_match:
+                src_matches.append(src_match.group(1))
+            css_segment = "" if tag == "*" else tag
+            css_segment += "".join(f".{class_name}" for class_name in classes)
+            parsed_segments.append(css_segment or "*")
+
+        if not parsed_segments or not has_supported_condition:
             return None
 
-        css_selector = "" if tag == "*" else tag
-        css_selector += "".join(f".{class_name}" for class_name in classes)
+        css_selector = " ".join(parsed_segments)
         elements = self.page.get_elements(
             css_selector or "*",
             max_timeout=0,
             index=-1,
         )
 
-        if text_match:
-            expected_text = text_match.group(1)
+        for expected_text in text_matches:
             exact_elements = [
                 element
                 for element in elements
@@ -483,8 +500,7 @@ def patch_runtime_files(package_dir):
                 for element in elements
                 if expected_text in str(element.inner_text or "")
             ]
-        if src_match:
-            expected_src = src_match.group(1)
+        for expected_src in src_matches:
             elements = [
                 element
                 for element in elements
@@ -605,6 +621,8 @@ def patch_runtime_files(package_dir):
         base_page_path,
         """        el = self.find_element(selector)
         self.log_step(f"点击元素: {selector}")
+        self.logger.info(f"Click -> {selector}")
+        el.click()
 """,
         r'''        if self._try_custom_tab_click(selector):
             self.wait(after_wait, "after custom TabBar click")
@@ -621,6 +639,22 @@ def patch_runtime_files(package_dir):
 
         el = self.find_element(selector)
         self.log_step(f"点击元素: {selector}")
+        self.logger.info(f"Click -> {selector}")
+        # Minium skips Element.click() when the matched text node has
+        # pointer-events:none.  In Mini Programs this is common: the text is
+        # intentionally non-interactive while its clickable parent handles the
+        # tap.  Send the tap through the protocol so the parent can receive it.
+        try:
+            pointer_events = el.styles("pointer-events")
+        except Exception:
+            pointer_events = None
+        if pointer_events and pointer_events[0] == "none":
+            self.logger.warning(
+                f"Element has pointer-events:none; sending direct tap: {selector}"
+            )
+            el.tap()
+        else:
+            el.click()
 ''',
     )
 
@@ -661,6 +695,34 @@ def patch_runtime_files(package_dir):
             self.wait(0.5)
         return False
         """,
+    )
+
+    step_executor_path = package_dir / "framework" / "utils" / "step_executor.py"
+    replace_once(
+        step_executor_path,
+        "        if not self.should_run_step(step):\n"
+        "            self.ui.log_step(f\"条件不满足，跳过步骤: {self.step_label(step)}\")\n"
+        "            return\n",
+        "        if not self.should_run_step(step):\n"
+        "            self.ui.log_step(f\"条件不满足，跳过步骤: {self.step_label(step)}\")\n"
+        "            condition_options = parse_options(\n"
+        "                self.resolve_text(step.get(\"condition_options\"))\n"
+        "            )\n"
+        "            if clean(condition_options.get(\"stop_on_condition_fail\")).lower() in {\n"
+        "                \"true\", \"1\", \"yes\", \"y\"\n"
+        "            }:\n"
+        "                self.stop_steps = True\n"
+        "                self.ui.log_step(\"条件不满足，停止本用例后续步骤\")\n"
+        "            return\n",
+    )
+    replace_once(
+        step_executor_path,
+        "        for step in steps:\n"
+        "            self.execute_step(step, depth=depth + 1)\n",
+        "        for step in steps:\n"
+        "            if self.stop_steps:\n"
+        "                break\n"
+        "            self.execute_step(step, depth=depth + 1)\n",
     )
 
     action_executor_path = package_dir / "framework" / "utils" / "action_executor.py"

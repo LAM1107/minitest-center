@@ -7,7 +7,7 @@
   <script>
     (function () {
       var path = window.location.pathname.replace(/\/+$/, "") || "/";
-      var markers = ["/cases", "/public-actions", "/iterations", "/api", "/reports"];
+      var markers = ["/cases", "/public-actions", "/iterations", "/schedules", "/api", "/reports"];
       var base = window.__MINITEST_SERVER_BASE_PATH__ || "";
       if (!base) {
         for (var i = 0; i < markers.length; i += 1) {
@@ -31,6 +31,7 @@
         <a class="tab" href="/public-actions" data-view="publicActions">公共动作库</a>
         <a class="tab" href="/iterations" data-view="iterations">需求迭代</a>
         <button type="button" class="tab" data-view="runs">执行记录</button>
+        <button type="button" class="tab" data-view="schedules">定时任务</button>
       </nav>
 
       <!-- 正式用例页 -->
@@ -202,7 +203,7 @@
           <div class="run-table">
             <div class="run-table-header">
               <div>任务 ID</div>
-              <div>用例</div>
+              <div>执行对象</div>
               <div>执行位置</div>
               <div>触发方式</div>
               <div>状态</div>
@@ -220,7 +221,7 @@
           <div class="report-table">
             <div class="report-table-header">
               <div>报告名称</div>
-              <div>用例</div>
+              <div>执行对象</div>
               <div>执行类型</div>
               <div>状态</div>
               <div>结果</div>
@@ -228,6 +229,27 @@
               <div>入口</div>
             </div>
             <div id="reportList" class="report-list"></div>
+          </div>
+        </div>
+      </section>
+      <!-- 定时任务页 -->
+      <section id="schedulesView" class="view-panel">
+        <div class="editor">
+          <div class="toolbar">
+            <div><h2>定时任务</h2><p class="hint">集中查看自动执行计划，点击“新建任务”配置执行时间。</p></div>
+            <div class="toolbar-actions">
+              <a class="btn btn-primary btn-sm" href="/schedules/new">新建任务</a>
+              <button id="refreshSchedulesBtn" class="btn btn-secondary btn-sm" type="button">刷新</button>
+            </div>
+          </div>
+          <div class="schedule-list-summary">
+            <div><strong id="scheduleEnabledCount">0</strong><span>启用中</span></div>
+            <div><strong id="scheduleTotalCount">0</strong><span>全部任务</span></div>
+            <div><strong>15 秒</strong><span>调度检查间隔</span></div>
+          </div>
+          <div class="run-table schedule-list-table">
+            <div class="run-table-header"><div>名称</div><div>执行迭代</div><div>Cron</div><div>下次执行</div><div>状态</div><div>操作</div></div>
+            <div id="scheduleList" class="job-list"></div>
           </div>
         </div>
       </section>
@@ -393,6 +415,10 @@
           <label>
             <span>条件参数</span>
             <input name="condition_options" placeholder="timeout=2,index=1">
+          </label>
+          <label class="condition-stop-on-fail">
+            <input name="stop_on_condition_fail" type="checkbox">
+            <span>条件不满足时停止本用例后续步骤</span>
           </label>
         </div>
       </details>

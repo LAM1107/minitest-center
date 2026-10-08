@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>定时任务编辑</title>
+  <script>
+    (function () {
+      var path = window.location.pathname.replace(/\/+$/, "") || "/";
+      var markers = ["/cases", "/public-actions", "/iterations", "/schedules", "/api", "/reports"];
+      var base = window.__MINITEST_SERVER_BASE_PATH__ || "";
+      if (!base) {
+        for (var i = 0; i < markers.length; i += 1) {
+          var index = path.indexOf(markers[i]);
+          if (index > 0) { base = path.slice(0, index); break; }
+        }
+      }
+      window.__MINITEST_BASE_PATH__ = base === "/" ? "" : base;
+      document.write('<link rel="stylesheet" href="' + window.__MINITEST_BASE_PATH__ + '/style.css">');
+    })();
+  </script>
+</head>
+<body>
+  <main class="app-shell app-shell-single">
+    <section class="workspace">
+      <nav class="tabs">
+        <a class="tab" href="/cases">正式用例</a>
+        <a class="tab" href="/public-actions">公共动作库</a>
+        <a class="tab" href="/iterations">需求迭代</a>
+        <a class="tab" href="/schedules">定时任务</a>
+      </nav>
+
+      <form id="scheduleEditorForm" class="editor editor-page schedule-editor">
+        <input name="id" type="hidden">
+        <div class="toolbar schedule-editor-toolbar">
+          <div>
+            <h2 id="scheduleEditorTitle">新建定时任务</h2>
+            <p class="hint">配置一次后，中心服务会按照计划自动执行所选迭代。</p>
+          </div>
+          <div class="toolbar-actions">
+            <a class="btn btn-secondary" href="/schedules">返回列表</a>
+            <button id="saveScheduleBtn" class="btn btn-primary" type="submit">保存任务</button>
+          </div>
+        </div>
+
+        <div class="schedule-editor-section">
+          <div class="section-title"><div><h2>基本信息</h2><p class="hint">定时任务会执行所选迭代下所有已启用的正式用例。</p></div></div>
+          <div class="grid schedule-editor-grid">
+            <label><span>任务名称</span><input name="schedule_name" required placeholder="例如：工作日登录回归"></label>
+            <label><span>执行迭代</span>
+              <select id="scheduleIteration" name="iteration_id" required>
+                <option value="">正在加载迭代...</option>
+              </select>
+              <small id="scheduleLegacyWarning" class="field-help" hidden></small>
+            </label>
+            <label><span>执行目标</span>
+              <select id="scheduleRunTarget" name="run_target" aria-describedby="scheduleRunTargetHelp">
+                <option value="center">中心机（当前服务所在电脑）</option>
+              </select>
+              <small id="scheduleRunTargetHelp" class="field-help">本机调试请选择“中心机”；启动 Agent 后可选择在线执行机。</small>
+            </label>
+            <label class="wide"><span>备注</span><textarea name="remark" rows="2" placeholder="例如：每天上班前检查登录流程"></textarea></label>
+          </div>
+        </div>
+
+        <div class="schedule-editor-section schedule-time-section">
+          <div class="section-title"><div><h2>执行时间</h2><p class="hint">选择常用模板即可自动生成 Cron；需要更复杂的计划时再手动编辑。</p></div></div>
+          <div class="schedule-time-picker">
+            <label><span>常用时间模板</span>
+              <select id="schedulePreset" aria-label="选择常用 Cron 模板">
+                <option value="">选择一个模板</option>
+                <option value="*/5 * * * *">每 5 分钟</option>
+                <option value="0 * * * *">每小时整点</option>
+                <option value="0 9 * * *">每天上午 9:00</option>
+                <option value="0 18 * * *">每天晚上 18:00</option>
+                <option value="0 9 * * 1-5">工作日上午 9:00</option>
+                <option value="0 9 * * 1">每周一上午 9:00</option>
+                <option value="0 9 1 * *">每月 1 号上午 9:00</option>
+                <option value="custom">自定义 Cron</option>
+              </select>
+            </label>
+            <label class="schedule-cron-input"><span>Cron 表达式</span><input name="cron_expr" required placeholder="例如：0 9 * * 1-5" aria-describedby="scheduleCronHelp"></label>
+          </div>
+          <div id="scheduleCronHelp" class="schedule-cron-guide" role="note">
+            <strong>怎么看这 5 个位置？</strong>
+            <span class="cron-token"><b>分</b><code>0-59</code></span>
+            <span class="cron-token"><b>时</b><code>0-23</code></span>
+            <span class="cron-token"><b>日</b><code>1-31</code></span>
+            <span class="cron-token"><b>月</b><code>1-12</code></span>
+            <span class="cron-token"><b>周</b><code>0-7</code></span>
+            <span class="cron-example"><code>0 9 * * 1-5</code> = 工作日 9:00</span>
+            <span class="cron-example"><code>*/10 * * * *</code> = 每 10 分钟</span>
+            <span class="hint">符号说明：<code>*</code> 表示任意，<code>*/5</code> 表示每 5 个单位，<code>1-5</code> 表示一个范围。</span>
+          </div>
+        </div>
+
+        <div class="schedule-editor-footer">
+          <label class="schedule-enabled"><input name="enabled" type="checkbox" checked><span>启用这个定时任务</span></label>
+          <div id="scheduleFormMessage" class="form-message" role="status"></div>
+        </div>
+      </form>
+    </section>
+  </main>
+  <script>
+    document.write('<script src="' + (window.__MINITEST_BASE_PATH__ || '') + '/schedule_form.js"><\/script>');
+  </script>
+</body>
+</html>

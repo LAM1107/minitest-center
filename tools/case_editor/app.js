@@ -16,6 +16,7 @@ const state = {
   executionTargetId: "",
   jobs: [],
   reports: [],
+  schedules: [],
   runtimePagination: {
     page: 1,
     page_size: DEFAULT_RUNTIME_PAGE_SIZE,
@@ -55,8 +56,8 @@ const state = {
 };
 
 // 管理页既支持根路径，也支持反向代理挂载到 /minitest 之类的子路径。
-const EXPECTED_SERVER_VERSION = "case-editor-20260723-center-runtime-v24";
-const ROUTE_MARKERS = ["/cases", "/public-actions", "/iterations", "/api", "/reports"];
+const EXPECTED_SERVER_VERSION = "case-editor-20260930-center-runtime-v25";
+const ROUTE_MARKERS = ["/cases", "/public-actions", "/iterations", "/schedules", "/api", "/reports"];
 const APP_BASE_PATH = normalizeBasePath(window.__MINITEST_BASE_PATH__ || inferBasePath());
 const EMBED_MODE = new URLSearchParams(window.location.search).get("embed") === "1";
 const CONDITION_TYPES = [
@@ -96,6 +97,10 @@ const newIterationBtn = document.querySelector("#newIterationBtn");
 const refreshIterationsBtn = document.querySelector("#refreshIterationsBtn");
 const runJobsEl = document.querySelector("#runJobs");
 const reportListEl = document.querySelector("#reportList");
+const scheduleListEl = document.querySelector("#scheduleList");
+const refreshSchedulesBtn = document.querySelector("#refreshSchedulesBtn");
+const scheduleEnabledCountEl = document.querySelector("#scheduleEnabledCount");
+const scheduleTotalCountEl = document.querySelector("#scheduleTotalCount");
 const publicActionListEl = document.querySelector("#publicActionListContainer");
 const publicActionSearch = document.querySelector("#publicActionSearch");
 const publicActionPageFilter = document.querySelector("#publicActionPageFilter");
@@ -228,6 +233,29 @@ function fillConditionTypeSelect(select, selected = "always") {
     .join("");
 }
 
+function parseConditionOptions(value) {
+  const raw = String(value || "").trim();
+  const separator = raw.includes(";") ? ";" : ",";
+  const visibleOptions = [];
+  let stopOnConditionFail = false;
+  for (const option of raw.split(separator)) {
+    const match = option.match(/^\s*stop_on_condition_fail\s*=\s*(.*?)\s*$/i);
+    if (!match) {
+      if (option.trim()) visibleOptions.push(option.trim());
+      continue;
+    }
+    stopOnConditionFail = ["true", "1", "yes", "y"].includes(match[1].toLowerCase());
+  }
+  return { options: visibleOptions.join(separator), separator, stopOnConditionFail };
+}
+
+function serializeConditionOptions(value, stopOnConditionFail) {
+  const parsed = parseConditionOptions(value);
+  const options = parsed.options ? parsed.options.split(parsed.separator) : [];
+  if (stopOnConditionFail) options.push("stop_on_condition_fail=true");
+  return options.map((option) => option.trim()).filter(Boolean).join(parsed.separator);
+}
+
 function conditionText(step = {}) {
   const type = step.condition_type || "always";
   if (!type || type === "always") return "总是执行";
@@ -284,6 +312,7 @@ function routeView() {
   const path = currentPath();
   if (["/public-actions", "/public-actions/new", "/public-actions/edit"].includes(path)) return "publicActions";
   if (path === "/iterations") return "iterations";
+  if (path === "/schedules") return "schedules";
   if (path === "/" || path === "/cases") return "runtime";
   return "";
 }
@@ -857,7 +886,9 @@ function createPublicActionStep(step = {}) {
   node.querySelector('[name="locator_options"]').value = step.locator_options || "";
   node.querySelector('[name="step_value"]').value = step.step_value || "";
   node.querySelector('[name="condition_locator_value"]').value = step.condition_locator_value || "";
-  node.querySelector('[name="condition_options"]').value = step.condition_options || "";
+  const conditionOptions = parseConditionOptions(step.condition_options);
+  node.querySelector('[name="condition_options"]').value = conditionOptions.options;
+  node.querySelector('[name="stop_on_condition_fail"]').checked = conditionOptions.stopOnConditionFail;
   node.querySelector('[name="remark"]').value = step.remark || "";
   node.querySelector('[name="locator_method"]').addEventListener("change", () => refreshStepHints(node));
   node.querySelector('[name="use_candidates"]').addEventListener("change", (event) => {
@@ -908,7 +939,11 @@ function getPublicActionStepData() {
     condition_type: node.querySelector('[name="condition_type"]').value,
     condition_locator_method: node.querySelector('[name="condition_locator_method"]').value,
     condition_locator_value: node.querySelector('[name="condition_locator_value"]').value.trim(),
-    condition_options: node.querySelector('[name="condition_options"]').value.trim(),
+    condition_options: serializeConditionOptions(
+      node.querySelector('[name="condition_options"]').value,
+      node.querySelector('[name="stop_on_condition_fail"]').checked
+    ),
+    stop_on_condition_fail: node.querySelector('[name="stop_on_condition_fail"]').checked,
     child_public_action_id: node.dataset.childPublicActionId || "",
     remark: node.querySelector('[name="remark"]').value.trim(),
   }));
@@ -1265,6 +1300,29 @@ async function loadRuns() {
   state.jobs = data.jobs || [];
   state.reports = data.reports || [];
   renderRuns();
+}
+
+async function loadSchedules() {
+  const data = await api("/api/schedule_list");
+  state.schedules = data.schedules || [];
+  if (scheduleEnabledCountEl) {
+    scheduleEnabledCountEl.textContent = String(state.schedules.filter((item) => Number(item.enabled) !== 0).length);
+  }
+  if (scheduleTotalCountEl) scheduleTotalCountEl.textContent = String(state.schedules.length);
+  if (!scheduleListEl) return;
+  scheduleListEl.innerHTML = state.schedules.map((item) => `
+    <div class="job-row">
+      <div><strong>${escapeHtml(item.schedule_name)}</strong><small>${escapeHtml(item.remark || "")}</small></div>
+      <div>${escapeHtml(item.iteration_name || item.iteration_code || (item.legacy_case_id ? `待迁移（原用例 ${item.legacy_case_id}）` : "未指定迭代"))}</div>
+      <div><code>${escapeHtml(item.cron_expr)}</code></div>
+      <div>${escapeHtml(item.next_run_at || "-")}</div>
+      <div>${Number(item.enabled) ? "启用" : "停用"}${item.last_status ? ` / ${escapeHtml(item.last_status)}` : ""}</div>
+      <div class="row-actions">
+        <button class="btn btn-secondary btn-sm" data-schedule-action="run" data-id="${item.id}" ${item.iteration_id ? "" : "disabled title=\"请先编辑并选择迭代\""}>立即执行</button>
+        <a class="btn btn-secondary btn-sm" href="${appUrl(`/schedules/edit?id=${encodeURIComponent(item.id)}`)}">编辑</a>
+        <button class="btn btn-ghost btn-sm" data-schedule-action="delete" data-id="${item.id}">删除</button>
+      </div>
+    </div>`).join("") || `<div class="empty-state">暂无定时任务</div>`;
 }
 
 // 提交前先校验执行位置：未选择执行机且中心机执行禁用时，
@@ -1637,6 +1695,10 @@ async function loadViewData(view) {
 
   if (view === "runs") {
     await loadRuns();
+    return;
+  }
+  if (view === "schedules") {
+    await loadSchedules();
   }
 }
 
@@ -1857,6 +1919,23 @@ document.querySelector("#refreshRunsBtn").addEventListener("click", async () => 
   } catch (error) {
     log(`刷新执行记录失败: ${error.message}`);
   }
+});
+
+refreshSchedulesBtn?.addEventListener("click", () => loadSchedules().catch((e) => log(`刷新定时任务失败: ${e.message}`)));
+scheduleListEl?.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-schedule-action]");
+  if (!button) return;
+  const id = button.dataset.id;
+  try {
+    if (button.dataset.scheduleAction === "delete") {
+      if (!window.confirm("确定删除这个定时任务吗？")) return;
+      await api("/api/schedule_delete", { method: "POST", body: JSON.stringify({ id }) });
+    } else if (button.dataset.scheduleAction === "run") {
+      await api("/api/schedule_run", { method: "POST", body: JSON.stringify({ id }) });
+      log("定时任务已立即触发");
+    }
+    await loadSchedules();
+  } catch (error) { showToast(`操作失败：${error.message}`, "error"); }
 });
 
 publicActionSearch.addEventListener("input", () => reloadPublicActionLibraryWithFilters(true));
